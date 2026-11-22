@@ -1,0 +1,60 @@
+name: Build NICHE APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        submodules: recursive
+
+    - name: Rename to NICHE
+      run: |
+        grep -rl "Echo Music" --include=*.xml app/src/main/res | xargs -r sed -i 's/Echo Music/NICHE/g'
+        grep -rl "Echo Music" --include=*.kt app/src/main/kotlin | xargs -r sed -i '/Echo Music Project (C)/! s/Echo Music/NICHE/g'
+
+    - name: Chrome theme
+      run: |
+        T=app/src/main/kotlin/com/music/echo/ui/theme/Theme.kt
+        sed -i 's/val DefaultThemeColor = Color(0xFFED5564)/val DefaultThemeColor = Color(0xFFB8C0CC)/' $T
+        sed -i 's/!isMonochrome \&\& (themeColor == DefaultThemeColor \&\& Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)/false/' $T
+        sed -i 's/style = PaletteStyle.TonalSpot/style = if (themeColor == DefaultThemeColor) PaletteStyle.Neutral else PaletteStyle.TonalSpot/' $T
+        sed -i 's|<string name="palette_dynamic">Dynamic</string>|<string name="palette_dynamic">Chrome</string>|' app/src/main/res/values/echo_strings.xml
+        grep -q "0xFFB8C0CC" $T
+        grep -q "PaletteStyle.Neutral else" $T
+        grep -q "^    false$" $T
+
+    - name: NICHE icon
+      run: |
+        test -f make_icon.py
+        IMG=$(find . -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) | head -n 1)
+        test -n "$IMG"
+        python3 -m venv /tmp/v
+        /tmp/v/bin/pip install --quiet pillow
+        /tmp/v/bin/python make_icon.py "$IMG" app/src/main/res
+
+    - uses: actions/setup-java@v6
+      with:
+        java-version: '21'
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: NDK
+      run: |
+        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;28.2.13676358" || true
+
+    - name: Build APK
+      run: |
+        mkdir -p "$HOME/.android"
+        keytool -genkeypair -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey -keypass android -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -validity 10000
+        chmod +x gradlew
+        ./gradlew assembleUniversalFossDebug
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: NICHE-APK
+        path: app/build/outputs/apk/**/*.apk
