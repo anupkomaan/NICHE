@@ -3,6 +3,9 @@ name: Build NICHE APK
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -52,7 +55,17 @@ jobs:
         mkdir -p "$HOME/.android"
         keytool -genkeypair -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey -keypass android -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -validity 10000
         chmod +x gradlew
-        ./gradlew assembleUniversalFossDebug
+        ./gradlew assembleArm64FossDebug
+
+    - name: Publish APK to Releases
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        APK=$(find app/build/outputs/apk -name '*.apk' | head -n 1)
+        test -n "$APK"
+        cp "$APK" NICHE.apk
+        gh release delete niche-latest --yes --cleanup-tag || true
+        gh release create niche-latest NICHE.apk --title "NICHE APK" --notes "Latest NICHE build" --target "$GITHUB_SHA"
 
     - uses: actions/upload-artifact@v7
       with:
