@@ -156,10 +156,10 @@ index 0000000..659293d
 +}
 diff --git a/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenPlayerActivity.kt b/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenPlayerActivity.kt
 new file mode 100644
-index 0000000..c3f85ec
+index 0000000..be700da
 --- /dev/null
 +++ b/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenPlayerActivity.kt
-@@ -0,0 +1,495 @@
+@@ -0,0 +1,596 @@
 +package echo.music.iad1tya.ui.lockscreen
 +
 +import android.app.KeyguardManager
@@ -176,7 +176,10 @@ index 0000000..c3f85ec
 +import android.view.WindowManager
 +import androidx.activity.ComponentActivity
 +import androidx.activity.compose.setContent
++import androidx.compose.animation.core.tween
++import androidx.compose.animation.Crossfade
 +import androidx.compose.foundation.background
++import androidx.compose.foundation.border
 +import androidx.compose.foundation.clickable
 +import androidx.compose.foundation.gestures.detectVerticalDragGestures
 +import androidx.compose.foundation.interaction.DragInteraction
@@ -186,6 +189,7 @@ index 0000000..c3f85ec
 +import androidx.compose.foundation.layout.Column
 +import androidx.compose.foundation.layout.PaddingValues
 +import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.aspectRatio
 +import androidx.compose.foundation.layout.Spacer
 +import androidx.compose.foundation.layout.fillMaxSize
 +import androidx.compose.foundation.layout.fillMaxWidth
@@ -215,6 +219,7 @@ index 0000000..c3f85ec
 +import androidx.compose.runtime.collectAsState
 +import androidx.compose.runtime.getValue
 +import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableFloatStateOf
 +import androidx.compose.runtime.mutableLongStateOf
 +import androidx.compose.runtime.mutableStateOf
 +import androidx.compose.runtime.remember
@@ -225,6 +230,8 @@ index 0000000..c3f85ec
 +import androidx.compose.ui.draw.blur
 +import androidx.compose.ui.draw.clip
 +import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.ColorMatrix
++import androidx.compose.ui.graphics.ColorFilter
 +import androidx.compose.ui.graphics.Color
 +import androidx.compose.ui.graphics.graphicsLayer
 +import androidx.compose.ui.graphics.vector.ImageVector
@@ -388,6 +395,7 @@ index 0000000..c3f85ec
 +  var items by remember(player) { mutableStateOf(emptyList<LockItem>()) }
 +  var index by remember(player) { mutableIntStateOf(0) }
 +  var playing by remember(player) { mutableStateOf(false) }
++  var progress by remember(player) { mutableFloatStateOf(0f) }
 +
 +  DisposableEffect(player) {
 +    val p = player
@@ -416,23 +424,36 @@ index 0000000..c3f85ec
 +    onDispose { p?.removeListener(listener) }
 +  }
 +
++  LaunchedEffect(player) {
++    while (true) {
++      val p = player
++      val d = p?.duration ?: 0L
++      progress = if (p != null && d > 0L) (p.currentPosition.toFloat() / d).coerceIn(0f, 1f) else 0f
++      delay(500L)
++    }
++  }
++
 +  val safeIndex = index.coerceIn(0, (items.size - 1).coerceAtLeast(0))
 +  val current = items.getOrNull(safeIndex)
 +
 +  Box(Modifier.fillMaxSize().background(Color.Black)) {
 +    val backgroundUrl = current?.artworkUrl
-+    if (backgroundUrl != null) {
-+      AsyncImage(
-+        model = ImageRequest.Builder(context).data(backgroundUrl).build(),
-+        contentDescription = null,
-+        contentScale = ContentScale.Crop,
-+        modifier = Modifier.fillMaxSize().blur(60.dp),
-+      )
++    // The whole screen takes the colours of the current album cover and fades when the song changes.
++    Crossfade(targetState = backgroundUrl, animationSpec = tween(700), label = "bg") { url ->
++      if (url != null) {
++        AsyncImage(
++          model = ImageRequest.Builder(context).data(url).build(),
++          contentDescription = null,
++          contentScale = ContentScale.Crop,
++          colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(1.5f) }),
++          modifier = Modifier.fillMaxSize().blur(100.dp),
++        )
++      }
 +    }
 +    Box(
 +      Modifier.fillMaxSize()
 +        .background(
-+          Brush.verticalGradient(listOf(Color(0x99000000), Color(0x40000000), Color(0xE6000000)))
++          Brush.verticalGradient(listOf(Color(0x40000000), Color(0x00000000), Color(0x80000000)))
 +        )
 +    )
 +
@@ -440,7 +461,7 @@ index 0000000..c3f85ec
 +      modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
 +      horizontalAlignment = Alignment.CenterHorizontally,
 +    ) {
-+      ClockBlock(Modifier.padding(top = 36.dp))
++      ClockBlock(Modifier.padding(top = 24.dp))
 +      Spacer(Modifier.weight(1f))
 +
 +      if (items.isEmpty()) {
@@ -453,41 +474,15 @@ index 0000000..c3f85ec
 +            p.play()
 +          }
 +        }
-+        Spacer(Modifier.height(18.dp))
-+        Text(
-+          text = current?.title.orEmpty(),
-+          color = Color.White,
-+          fontSize = 22.sp,
-+          fontWeight = FontWeight.Bold,
-+          maxLines = 1,
-+          overflow = TextOverflow.Ellipsis,
-+          textAlign = TextAlign.Center,
-+          modifier = Modifier.padding(horizontal = 32.dp),
++        Spacer(Modifier.height(28.dp))
++        ControlBar(
++          current = current,
++          playing = playing,
++          progress = progress,
++          onPrevious = { player?.skipToPrevious() },
++          onToggle = { player?.togglePlayback() },
++          onNext = { player?.skipToNext() },
 +        )
-+        Text(
-+          text = current?.artist.orEmpty(),
-+          color = Color.White.copy(alpha = 0.75f),
-+          fontSize = 16.sp,
-+          maxLines = 1,
-+          overflow = TextOverflow.Ellipsis,
-+          textAlign = TextAlign.Center,
-+          modifier = Modifier.padding(horizontal = 32.dp, vertical = 4.dp),
-+        )
-+        Spacer(Modifier.height(24.dp))
-+        Row(
-+          verticalAlignment = Alignment.CenterVertically,
-+          horizontalArrangement = Arrangement.spacedBy(28.dp),
-+        ) {
-+          RoundButton(Icons.Rounded.SkipPrevious, 56.dp, 34.dp, { player?.skipToPrevious() })
-+          RoundButton(
-+            icon = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-+            size = 76.dp,
-+            iconSize = 48.dp,
-+            onClick = { player?.togglePlayback() },
-+            filled = true,
-+          )
-+          RoundButton(Icons.Rounded.SkipNext, 56.dp, 34.dp, { player?.skipToNext() })
-+        }
 +      }
 +
 +      Spacer(Modifier.weight(1f))
@@ -496,19 +491,23 @@ index 0000000..c3f85ec
 +  }
 +}
 +
++private val GlassFill = Brush.verticalGradient(listOf(Color(0x44FFFFFF), Color(0x1AFFFFFF)))
++private val GlassBorder = Color(0x44FFFFFF)
++
 +@Composable
 +private fun CoverRow(items: List<LockItem>, index: Int, onPageSettled: (Int) -> Unit) {
 +  val context = LocalContext.current
 +  BoxWithConstraints(Modifier.fillMaxWidth()) {
-+    val cover = minOf(maxWidth * 0.62f, 300.dp)
-+    val sidePadding = (maxWidth - cover) / 2
++    val cardWidth = minOf(maxWidth * 0.62f, 280.dp)
++    val cardHeight = cardWidth + 52.dp
++    val sidePadding = (maxWidth - cardWidth) / 2
 +    val pagerState =
 +      rememberPagerState(initialPage = index.coerceIn(0, (items.size - 1).coerceAtLeast(0))) {
 +        items.size
 +      }
 +    var userDragged by remember { mutableStateOf(false) }
 +
-+    // Song changed from outside (skip button, notification, auto-next): move the covers.
++    // Song changed from outside (skip button, notification, auto-next): move the cards.
 +    LaunchedEffect(index, items.size) {
 +      if (
 +        items.isNotEmpty() &&
@@ -520,13 +519,13 @@ index 0000000..c3f85ec
 +        pagerState.animateScrollToPage(index)
 +      }
 +    }
-+    // Remember that the finger (not the code) moved the covers.
++    // Remember that the finger (not the code) moved the cards.
 +    LaunchedEffect(pagerState) {
 +      pagerState.interactionSource.interactions.collect {
 +        if (it is DragInteraction.Start) userDragged = true
 +      }
 +    }
-+    // Finger swipe finished on a new cover: play that song.
++    // Finger swipe finished on a new card: play that song.
 +    LaunchedEffect(pagerState) {
 +      snapshotFlow { pagerState.settledPage }
 +        .collect { page ->
@@ -539,33 +538,135 @@ index 0000000..c3f85ec
 +
 +    HorizontalPager(
 +      state = pagerState,
-+      modifier = Modifier.fillMaxWidth().height(cover + 24.dp),
++      modifier = Modifier.fillMaxWidth().height(cardHeight + 28.dp),
 +      contentPadding = PaddingValues(horizontal = sidePadding),
-+      pageSize = PageSize.Fixed(cover),
-+      pageSpacing = 8.dp,
++      pageSize = PageSize.Fixed(cardWidth),
 +      verticalAlignment = Alignment.CenterVertically,
 +    ) { page ->
 +      val offset = (pagerState.currentPage - page) + pagerState.currentPageOffsetFraction
 +      val distance = abs(offset).coerceAtMost(2f)
-+      Box(
-+        Modifier.size(cover)
++      val item = items.getOrNull(page)
++      val shape = RoundedCornerShape(28.dp)
++      Column(
++        Modifier.width(cardWidth)
++          .height(cardHeight)
 +          .zIndex(2f - distance)
 +          .graphicsLayer {
 +            val s = 1f - 0.16f * distance
 +            scaleX = s
 +            scaleY = s
 +            alpha = 1f - 0.3f * distance
-+            rotationY = (offset * 30f).coerceIn(-45f, 45f)
++            rotationY = (offset * 28f).coerceIn(-40f, 40f)
++            translationX = offset * cardWidth.toPx() * 0.3f
 +            cameraDistance = 14f * density
 +          }
-+          .clip(RoundedCornerShape(22.dp))
-+          .background(Color(0x33FFFFFF))
++          .clip(shape)
++          .background(GlassFill)
++          .border(1.dp, GlassBorder, shape)
++          .padding(12.dp),
++        horizontalAlignment = Alignment.CenterHorizontally,
 +      ) {
 +        AsyncImage(
-+          model = ImageRequest.Builder(context).data(items.getOrNull(page)?.artworkUrl).build(),
++          model = ImageRequest.Builder(context).data(item?.artworkUrl).build(),
 +          contentDescription = null,
 +          contentScale = ContentScale.Crop,
-+          modifier = Modifier.fillMaxSize(),
++          modifier =
++            Modifier.fillMaxWidth()
++              .aspectRatio(1f)
++              .clip(RoundedCornerShape(20.dp))
++              .background(Color(0x33FFFFFF)),
++        )
++        Spacer(Modifier.height(8.dp))
++        Text(
++          text = item?.title.orEmpty(),
++          color = Color.White,
++          fontSize = 16.sp,
++          fontWeight = FontWeight.SemiBold,
++          maxLines = 1,
++          overflow = TextOverflow.Ellipsis,
++        )
++        Text(
++          text = item?.artist.orEmpty(),
++          color = Color.White.copy(alpha = 0.7f),
++          fontSize = 14.sp,
++          maxLines = 1,
++          overflow = TextOverflow.Ellipsis,
++        )
++      }
++    }
++  }
++}
++
++@Composable
++private fun ControlBar(
++  current: LockItem?,
++  playing: Boolean,
++  progress: Float,
++  onPrevious: () -> Unit,
++  onToggle: () -> Unit,
++  onNext: () -> Unit,
++) {
++  val context = LocalContext.current
++  val shape = RoundedCornerShape(40.dp)
++  Row(
++    modifier =
++      Modifier.fillMaxWidth()
++        .padding(horizontal = 16.dp)
++        .clip(shape)
++        .background(GlassFill)
++        .border(1.dp, GlassBorder, shape)
++        .padding(horizontal = 12.dp, vertical = 10.dp),
++    verticalAlignment = Alignment.CenterVertically,
++    horizontalArrangement = Arrangement.spacedBy(4.dp),
++  ) {
++    RoundButton(Icons.Rounded.SkipPrevious, 40.dp, 26.dp, onPrevious)
++    RoundButton(
++      icon = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
++      size = 48.dp,
++      iconSize = 32.dp,
++      onClick = onToggle,
++    )
++    RoundButton(Icons.Rounded.SkipNext, 40.dp, 26.dp, onNext)
++    Spacer(Modifier.width(6.dp))
++    Column(
++      Modifier.weight(1f)
++        .clip(RoundedCornerShape(16.dp))
++        .background(Color(0x66000000))
++        .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 6.dp)
++    ) {
++      Row(verticalAlignment = Alignment.CenterVertically) {
++        AsyncImage(
++          model = ImageRequest.Builder(context).data(current?.artworkUrl).build(),
++          contentDescription = null,
++          contentScale = ContentScale.Crop,
++          modifier = Modifier.size(34.dp).clip(RoundedCornerShape(8.dp)),
++        )
++        Spacer(Modifier.width(8.dp))
++        Column {
++          Text(
++            text = current?.title.orEmpty(),
++            color = Color.White,
++            fontSize = 12.sp,
++            fontWeight = FontWeight.SemiBold,
++            maxLines = 1,
++            overflow = TextOverflow.Ellipsis,
++          )
++          Text(
++            text = current?.artist.orEmpty(),
++            color = Color.White.copy(alpha = 0.7f),
++            fontSize = 11.sp,
++            maxLines = 1,
++            overflow = TextOverflow.Ellipsis,
++          )
++        }
++      }
++      Spacer(Modifier.height(5.dp))
++      Box(Modifier.fillMaxWidth().height(3.dp).clip(CircleShape).background(Color(0x33FFFFFF))) {
++        Box(
++          Modifier.fillMaxWidth(progress.coerceIn(0f, 1f))
++            .height(3.dp)
++            .clip(CircleShape)
++            .background(Color.White)
 +        )
 +      }
 +    }
@@ -594,7 +695,7 @@ index 0000000..c3f85ec
 +      fontSize = 18.sp,
 +      fontWeight = FontWeight.Medium,
 +    )
-+    Text(text = time, color = Color.White, fontSize = 88.sp, fontWeight = FontWeight.Bold)
++    Text(text = time, color = Color.White, fontSize = 64.sp, fontWeight = FontWeight.Bold)
 +  }
 +}
 +
