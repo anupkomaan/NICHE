@@ -1,0 +1,740 @@
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 71844b7..8aed66c 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -4,6 +4,7 @@
+ 
+     <uses-permission android:name="android.permission.INTERNET" />
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
++    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+@@ -83,6 +84,16 @@
+             android:name="org.apache.http.legacy"
+             android:required="false" />
+ 
++        <activity
++            android:name=".ui.lockscreen.LockScreenPlayerActivity"
++            android:exported="false"
++            android:excludeFromRecents="true"
++            android:launchMode="singleInstance"
++            android:showWhenLocked="true"
++            android:turnScreenOn="true"
++            android:taskAffinity=""
++            android:theme="@android:style/Theme.Material.NoActionBar" />
++
+         <activity
+             android:name=".ui.screens.CrashActivity"
+             android:exported="false"
+diff --git a/app/src/main/kotlin/com/music/echo/playback/MusicService.kt b/app/src/main/kotlin/com/music/echo/playback/MusicService.kt
+index c35e16a..b761272 100644
+--- a/app/src/main/kotlin/com/music/echo/playback/MusicService.kt
++++ b/app/src/main/kotlin/com/music/echo/playback/MusicService.kt
+@@ -118,7 +118,9 @@ import echo.music.iad1tya.constants.PreloadNextSongLimitKey
+ import echo.music.iad1tya.constants.PreventDuplicateTracksInQueueKey
+ import echo.music.iad1tya.constants.RememberShuffleAndRepeatKey
+ import echo.music.iad1tya.constants.RepeatModeKey
++import echo.music.iad1tya.constants.LockScreenPlayerEnabledKey
+ import echo.music.iad1tya.constants.ResumeOnBluetoothConnectKey
++import echo.music.iad1tya.ui.lockscreen.LockScreenLauncher
+ import echo.music.iad1tya.constants.ShowLyricsKey
+ import echo.music.iad1tya.constants.ShuffleModeKey
+ import echo.music.iad1tya.constants.ShufflePlaylistFirstKey
+@@ -726,6 +728,9 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
+           }
+           Intent.ACTION_SCREEN_ON -> {
+             if (player.isPlaying) {
++              if (dataStore.get(LockScreenPlayerEnabledKey, true)) {
++                LockScreenLauncher.launchIfLocked(this@MusicService)
++              }
+               scope.launch { currentSong.value?.let { song -> ensurePresenceManager() } }
+             }
+           }
+diff --git a/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenLauncher.kt b/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenLauncher.kt
+new file mode 100644
+index 0000000..659293d
+--- /dev/null
++++ b/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenLauncher.kt
+@@ -0,0 +1,97 @@
++package echo.music.iad1tya.ui.lockscreen
++
++import android.app.KeyguardManager
++import android.app.Notification
++import android.app.NotificationChannel
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.content.Context
++import android.content.Intent
++import android.net.Uri
++import android.os.Build
++import android.os.Handler
++import android.os.Looper
++import android.provider.Settings
++import androidx.core.app.NotificationCompat
++import echo.music.iad1tya.R
++
++/**
++ * Shows [LockScreenPlayerActivity] over the lock screen when the screen wakes while music plays.
++ *
++ * Android blocks apps from opening screens out of the blue, so besides a direct attempt this posts
++ * a short-lived full-screen-intent notification (the same mechanism alarm and call apps use).
++ */
++object LockScreenLauncher {
++  private const val CHANNEL_ID = "lock_screen_player"
++  private const val NOTIFICATION_ID = 7711
++
++  fun launchIfLocked(context: Context) {
++    val keyguard = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager ?: return
++    if (!keyguard.isKeyguardLocked) return
++
++    val intent =
++      Intent(context, LockScreenPlayerActivity::class.java)
++        .addFlags(
++          Intent.FLAG_ACTIVITY_NEW_TASK or
++            Intent.FLAG_ACTIVITY_CLEAR_TOP or
++            Intent.FLAG_ACTIVITY_NO_ANIMATION
++        )
++
++    runCatching { context.startActivity(intent) }
++    runCatching { postFullScreenIntent(context, intent) }
++  }
++
++  private fun postFullScreenIntent(context: Context, intent: Intent) {
++    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
++    if (!manager.areNotificationsEnabled()) return
++    if (Build.VERSION.SDK_INT >= 34 && !manager.canUseFullScreenIntent()) return
++
++    if (Build.VERSION.SDK_INT >= 26) {
++      val channel =
++        NotificationChannel(CHANNEL_ID, "Lock screen player", NotificationManager.IMPORTANCE_HIGH)
++          .apply {
++            setSound(null, null)
++            enableVibration(false)
++            setShowBadge(false)
++            lockscreenVisibility = Notification.VISIBILITY_SECRET
++          }
++      manager.createNotificationChannel(channel)
++    }
++
++    val pending =
++      PendingIntent.getActivity(
++        context,
++        0,
++        intent,
++        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
++      )
++
++    val notification =
++      NotificationCompat.Builder(context, CHANNEL_ID)
++        .setSmallIcon(R.drawable.echomusicnotification)
++        .setContentTitle("NICHE")
++        .setContentText("Lock screen player")
++        .setPriority(NotificationCompat.PRIORITY_HIGH)
++        .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
++        .setVisibility(NotificationCompat.VISIBILITY_SECRET)
++        .setAutoCancel(true)
++        .setFullScreenIntent(pending, true)
++        .build()
++
++    manager.notify(NOTIFICATION_ID, notification)
++    Handler(Looper.getMainLooper()).postDelayed({ manager.cancel(NOTIFICATION_ID) }, 4000L)
++  }
++
++  /** Opens the system page where the user can allow full-screen notifications (Android 14+). */
++  fun requestPermissionIfNeeded(context: Context) {
++    if (Build.VERSION.SDK_INT < 34) return
++    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
++    if (manager.canUseFullScreenIntent()) return
++    runCatching {
++      context.startActivity(
++        Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:" + context.packageName))
++          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++      )
++    }
++  }
++}
+diff --git a/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenPlayerActivity.kt b/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenPlayerActivity.kt
+new file mode 100644
+index 0000000..c3f85ec
+--- /dev/null
++++ b/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenPlayerActivity.kt
+@@ -0,0 +1,495 @@
++package echo.music.iad1tya.ui.lockscreen
++
++import android.app.KeyguardManager
++import android.content.BroadcastReceiver
++import android.content.ComponentName
++import android.content.Context
++import android.content.Intent
++import android.content.IntentFilter
++import android.content.ServiceConnection
++import android.os.Build
++import android.os.Bundle
++import android.os.IBinder
++import android.text.format.DateFormat
++import android.view.WindowManager
++import androidx.activity.ComponentActivity
++import androidx.activity.compose.setContent
++import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.gestures.detectVerticalDragGestures
++import androidx.compose.foundation.interaction.DragInteraction
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.BoxWithConstraints
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.navigationBarsPadding
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.statusBarsPadding
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.pager.HorizontalPager
++import androidx.compose.foundation.pager.PageSize
++import androidx.compose.foundation.pager.rememberPagerState
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.rounded.Pause
++import androidx.compose.material.icons.rounded.PlayArrow
++import androidx.compose.material.icons.rounded.SkipNext
++import androidx.compose.material.icons.rounded.SkipPrevious
++import androidx.compose.material3.Icon
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.material3.darkColorScheme
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.DisposableEffect
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.collectAsState
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableLongStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.runtime.snapshotFlow
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.blur
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.graphicsLayer
++import androidx.compose.ui.graphics.vector.ImageVector
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.layout.ContentScale
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.Dp
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import androidx.compose.ui.zIndex
++import androidx.core.view.WindowCompat
++import androidx.media3.common.MediaItem
++import androidx.media3.common.Player
++import androidx.media3.exoplayer.ExoPlayer
++import coil3.compose.AsyncImage
++import coil3.request.ImageRequest
++import echo.music.iad1tya.extensions.metadata
++import echo.music.iad1tya.playback.MusicService
++import echo.music.iad1tya.ui.utils.resize
++import java.text.SimpleDateFormat
++import java.util.Date
++import java.util.Locale
++import kotlin.math.abs
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++
++/**
++ * Full-screen music player shown over the lock screen while a song plays: big clock, a row of
++ * album covers (swipe to change song), and play / pause / skip buttons.
++ */
++class LockScreenPlayerActivity : ComponentActivity() {
++  private var service by mutableStateOf<MusicService?>(null)
++
++  private val connection =
++    object : ServiceConnection {
++      override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
++        service = (binder as? MusicService.MusicBinder)?.service
++      }
++
++      override fun onServiceDisconnected(name: ComponentName?) {
++        service = null
++      }
++    }
++
++  // Close this screen as soon as the phone is unlocked or the screen turns off again.
++  private val closeReceiver =
++    object : BroadcastReceiver() {
++      override fun onReceive(context: Context?, intent: Intent?) {
++        finish()
++      }
++    }
++
++  override fun onCreate(savedInstanceState: Bundle?) {
++    super.onCreate(savedInstanceState)
++
++    if (Build.VERSION.SDK_INT >= 27) {
++      setShowWhenLocked(true)
++      setTurnScreenOn(true)
++    } else {
++      @Suppress("DEPRECATION")
++      window.addFlags(
++        WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
++          WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
++      )
++    }
++    WindowCompat.setDecorFitsSystemWindows(window, false)
++
++    runCatching {
++      registerReceiver(
++        closeReceiver,
++        IntentFilter().apply {
++          addAction(Intent.ACTION_USER_PRESENT)
++          addAction(Intent.ACTION_SCREEN_OFF)
++        },
++      )
++    }
++
++    bindService(Intent(this, MusicService::class.java), connection, Context.BIND_AUTO_CREATE)
++
++    setContent {
++      MaterialTheme(colorScheme = darkColorScheme()) {
++        LockScreenPlayer(service = service, onUnlock = { requestUnlock() })
++      }
++    }
++  }
++
++  private fun requestUnlock() {
++    val keyguard = getSystemService(KeyguardManager::class.java)
++    if (keyguard == null || !keyguard.isKeyguardLocked) {
++      finish()
++      return
++    }
++    keyguard.requestDismissKeyguard(
++      this,
++      object : KeyguardManager.KeyguardDismissCallback() {
++        override fun onDismissSucceeded() {
++          finish()
++        }
++      },
++    )
++  }
++
++  override fun onDestroy() {
++    runCatching { unregisterReceiver(closeReceiver) }
++    runCatching { unbindService(connection) }
++    super.onDestroy()
++  }
++}
++
++private data class LockItem(
++  val id: String,
++  val title: String,
++  val artist: String,
++  val artworkUrl: String?,
++)
++
++private fun MediaItem.toLockItem(): LockItem {
++  val meta = metadata
++  return LockItem(
++    id = mediaId,
++    title = meta?.title ?: mediaMetadata.title?.toString().orEmpty(),
++    artist =
++      meta?.artists?.joinToString(", ") { it.name } ?: mediaMetadata.artist?.toString().orEmpty(),
++    artworkUrl = meta?.thumbnailUrl?.resize(800, 800),
++  )
++}
++
++private fun Player.readItems(): List<LockItem> =
++  (0 until mediaItemCount).map { getMediaItemAt(it).toLockItem() }
++
++private fun Player.skipToPrevious() {
++  if (hasPreviousMediaItem()) seekToPreviousMediaItem() else seekTo(0L)
++}
++
++private fun Player.skipToNext() {
++  if (hasNextMediaItem()) seekToNextMediaItem()
++}
++
++private fun Player.togglePlayback() {
++  if (playWhenReady && playbackState != Player.STATE_ENDED) {
++    pause()
++  } else {
++    if (playbackState == Player.STATE_IDLE) prepare()
++    if (playbackState == Player.STATE_ENDED) seekToDefaultPosition()
++    play()
++  }
++}
++
++@Composable
++private fun LockScreenPlayer(service: MusicService?, onUnlock: () -> Unit) {
++  val context = LocalContext.current
++
++  val playerFlow: StateFlow<ExoPlayer?> =
++    remember(service) { service?.playerFlow ?: MutableStateFlow<ExoPlayer?>(null) }
++  val player by playerFlow.collectAsState()
++
++  var items by remember(player) { mutableStateOf(emptyList<LockItem>()) }
++  var index by remember(player) { mutableIntStateOf(0) }
++  var playing by remember(player) { mutableStateOf(false) }
++
++  DisposableEffect(player) {
++    val p = player
++    val listener =
++      object : Player.Listener {
++        override fun onEvents(source: Player, events: Player.Events) {
++          if (
++            events.containsAny(
++              Player.EVENT_TIMELINE_CHANGED,
++              Player.EVENT_MEDIA_ITEM_TRANSITION,
++              Player.EVENT_MEDIA_METADATA_CHANGED,
++            )
++          ) {
++            items = source.readItems()
++          }
++          index = source.currentMediaItemIndex.coerceAtLeast(0)
++          playing = source.playWhenReady && source.playbackState != Player.STATE_ENDED
++        }
++      }
++    if (p != null) {
++      items = p.readItems()
++      index = p.currentMediaItemIndex.coerceAtLeast(0)
++      playing = p.playWhenReady && p.playbackState != Player.STATE_ENDED
++      p.addListener(listener)
++    }
++    onDispose { p?.removeListener(listener) }
++  }
++
++  val safeIndex = index.coerceIn(0, (items.size - 1).coerceAtLeast(0))
++  val current = items.getOrNull(safeIndex)
++
++  Box(Modifier.fillMaxSize().background(Color.Black)) {
++    val backgroundUrl = current?.artworkUrl
++    if (backgroundUrl != null) {
++      AsyncImage(
++        model = ImageRequest.Builder(context).data(backgroundUrl).build(),
++        contentDescription = null,
++        contentScale = ContentScale.Crop,
++        modifier = Modifier.fillMaxSize().blur(60.dp),
++      )
++    }
++    Box(
++      Modifier.fillMaxSize()
++        .background(
++          Brush.verticalGradient(listOf(Color(0x99000000), Color(0x40000000), Color(0xE6000000)))
++        )
++    )
++
++    Column(
++      modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
++      horizontalAlignment = Alignment.CenterHorizontally,
++    ) {
++      ClockBlock(Modifier.padding(top = 36.dp))
++      Spacer(Modifier.weight(1f))
++
++      if (items.isEmpty()) {
++        Text("Nothing playing", color = Color.White.copy(alpha = 0.7f), fontSize = 18.sp)
++      } else {
++        CoverRow(items = items, index = safeIndex) { page ->
++          val p = player
++          if (p != null && page in 0 until p.mediaItemCount && page != p.currentMediaItemIndex) {
++            p.seekTo(page, 0L)
++            p.play()
++          }
++        }
++        Spacer(Modifier.height(18.dp))
++        Text(
++          text = current?.title.orEmpty(),
++          color = Color.White,
++          fontSize = 22.sp,
++          fontWeight = FontWeight.Bold,
++          maxLines = 1,
++          overflow = TextOverflow.Ellipsis,
++          textAlign = TextAlign.Center,
++          modifier = Modifier.padding(horizontal = 32.dp),
++        )
++        Text(
++          text = current?.artist.orEmpty(),
++          color = Color.White.copy(alpha = 0.75f),
++          fontSize = 16.sp,
++          maxLines = 1,
++          overflow = TextOverflow.Ellipsis,
++          textAlign = TextAlign.Center,
++          modifier = Modifier.padding(horizontal = 32.dp, vertical = 4.dp),
++        )
++        Spacer(Modifier.height(24.dp))
++        Row(
++          verticalAlignment = Alignment.CenterVertically,
++          horizontalArrangement = Arrangement.spacedBy(28.dp),
++        ) {
++          RoundButton(Icons.Rounded.SkipPrevious, 56.dp, 34.dp, { player?.skipToPrevious() })
++          RoundButton(
++            icon = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
++            size = 76.dp,
++            iconSize = 48.dp,
++            onClick = { player?.togglePlayback() },
++            filled = true,
++          )
++          RoundButton(Icons.Rounded.SkipNext, 56.dp, 34.dp, { player?.skipToNext() })
++        }
++      }
++
++      Spacer(Modifier.weight(1f))
++      UnlockHint(onUnlock)
++    }
++  }
++}
++
++@Composable
++private fun CoverRow(items: List<LockItem>, index: Int, onPageSettled: (Int) -> Unit) {
++  val context = LocalContext.current
++  BoxWithConstraints(Modifier.fillMaxWidth()) {
++    val cover = minOf(maxWidth * 0.62f, 300.dp)
++    val sidePadding = (maxWidth - cover) / 2
++    val pagerState =
++      rememberPagerState(initialPage = index.coerceIn(0, (items.size - 1).coerceAtLeast(0))) {
++        items.size
++      }
++    var userDragged by remember { mutableStateOf(false) }
++
++    // Song changed from outside (skip button, notification, auto-next): move the covers.
++    LaunchedEffect(index, items.size) {
++      if (
++        items.isNotEmpty() &&
++          index in items.indices &&
++          pagerState.settledPage != index &&
++          !pagerState.isScrollInProgress
++      ) {
++        userDragged = false
++        pagerState.animateScrollToPage(index)
++      }
++    }
++    // Remember that the finger (not the code) moved the covers.
++    LaunchedEffect(pagerState) {
++      pagerState.interactionSource.interactions.collect {
++        if (it is DragInteraction.Start) userDragged = true
++      }
++    }
++    // Finger swipe finished on a new cover: play that song.
++    LaunchedEffect(pagerState) {
++      snapshotFlow { pagerState.settledPage }
++        .collect { page ->
++          if (userDragged) {
++            userDragged = false
++            onPageSettled(page)
++          }
++        }
++    }
++
++    HorizontalPager(
++      state = pagerState,
++      modifier = Modifier.fillMaxWidth().height(cover + 24.dp),
++      contentPadding = PaddingValues(horizontal = sidePadding),
++      pageSize = PageSize.Fixed(cover),
++      pageSpacing = 8.dp,
++      verticalAlignment = Alignment.CenterVertically,
++    ) { page ->
++      val offset = (pagerState.currentPage - page) + pagerState.currentPageOffsetFraction
++      val distance = abs(offset).coerceAtMost(2f)
++      Box(
++        Modifier.size(cover)
++          .zIndex(2f - distance)
++          .graphicsLayer {
++            val s = 1f - 0.16f * distance
++            scaleX = s
++            scaleY = s
++            alpha = 1f - 0.3f * distance
++            rotationY = (offset * 30f).coerceIn(-45f, 45f)
++            cameraDistance = 14f * density
++          }
++          .clip(RoundedCornerShape(22.dp))
++          .background(Color(0x33FFFFFF))
++      ) {
++        AsyncImage(
++          model = ImageRequest.Builder(context).data(items.getOrNull(page)?.artworkUrl).build(),
++          contentDescription = null,
++          contentScale = ContentScale.Crop,
++          modifier = Modifier.fillMaxSize(),
++        )
++      }
++    }
++  }
++}
++
++@Composable
++private fun ClockBlock(modifier: Modifier = Modifier) {
++  val context = LocalContext.current
++  var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
++  LaunchedEffect(Unit) {
++    while (true) {
++      now = System.currentTimeMillis()
++      delay(5_000L)
++    }
++  }
++  val locale = Locale.getDefault()
++  val is24Hour = DateFormat.is24HourFormat(context)
++  val time = SimpleDateFormat(if (is24Hour) "HH:mm" else "h:mm", locale).format(Date(now))
++  val date = SimpleDateFormat("EEEE, MMMM d", locale).format(Date(now))
++
++  Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
++    Text(
++      text = date,
++      color = Color.White.copy(alpha = 0.85f),
++      fontSize = 18.sp,
++      fontWeight = FontWeight.Medium,
++    )
++    Text(text = time, color = Color.White, fontSize = 88.sp, fontWeight = FontWeight.Bold)
++  }
++}
++
++@Composable
++private fun RoundButton(
++  icon: ImageVector,
++  size: Dp,
++  iconSize: Dp,
++  onClick: () -> Unit,
++  filled: Boolean = false,
++) {
++  Box(
++    modifier =
++      Modifier.size(size)
++        .clip(CircleShape)
++        .background(if (filled) Color(0x33FFFFFF) else Color.Transparent)
++        .clickable(onClick = onClick),
++    contentAlignment = Alignment.Center,
++  ) {
++    Icon(
++      imageVector = icon,
++      contentDescription = null,
++      tint = Color.White,
++      modifier = Modifier.size(iconSize),
++    )
++  }
++}
++
++@Composable
++private fun UnlockHint(onUnlock: () -> Unit) {
++  Box(
++    modifier =
++      Modifier.fillMaxWidth()
++        .height(88.dp)
++        .pointerInput(Unit) {
++          var total = 0f
++          detectVerticalDragGestures(
++            onDragStart = { total = 0f },
++            onDragEnd = { if (total < -120f) onUnlock() },
++            onDragCancel = {},
++          ) { change, dragAmount ->
++            change.consume()
++            total += dragAmount
++          }
++        }
++        .clickable { onUnlock() },
++    contentAlignment = Alignment.Center,
++  ) {
++    Column(horizontalAlignment = Alignment.CenterHorizontally) {
++      Box(
++        Modifier.width(44.dp)
++          .height(5.dp)
++          .clip(CircleShape)
++          .background(Color.White.copy(alpha = 0.6f))
++      )
++      Spacer(Modifier.height(10.dp))
++      Text("Swipe up to unlock", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp)
++    }
++  }
++}
+diff --git a/app/src/main/kotlin/com/music/echo/ui/screens/settings/PlayerSettings.kt b/app/src/main/kotlin/com/music/echo/ui/screens/settings/PlayerSettings.kt
+index 2e777b4..8667efa 100644
+--- a/app/src/main/kotlin/com/music/echo/ui/screens/settings/PlayerSettings.kt
++++ b/app/src/main/kotlin/com/music/echo/ui/screens/settings/PlayerSettings.kt
+@@ -63,7 +63,9 @@ import echo.music.iad1tya.constants.PreloadNextSongEnabledKey
+ import echo.music.iad1tya.constants.PreloadNextSongLimitKey
+ import echo.music.iad1tya.constants.PreventDuplicateTracksInQueueKey
+ import echo.music.iad1tya.constants.RememberShuffleAndRepeatKey
++import echo.music.iad1tya.constants.LockScreenPlayerEnabledKey
+ import echo.music.iad1tya.constants.ResumeOnBluetoothConnectKey
++import echo.music.iad1tya.ui.lockscreen.LockScreenLauncher
+ import echo.music.iad1tya.constants.AutoplayOnAutomotiveConnectKey
+ import echo.music.iad1tya.constants.SeekExtraSeconds
+ import echo.music.iad1tya.constants.ShufflePlaylistFirstKey
+@@ -191,6 +193,9 @@ fun PlayerSettings(
+   val (stopMusicOnTaskClear, onStopMusicOnTaskClearChange) =
+     rememberPreference(StopMusicOnTaskClearKey, defaultValue = true)
+   val (pauseOnMute, onPauseOnMuteChange) = rememberPreference(PauseOnMute, defaultValue = false)
++  val (lockScreenPlayer, onLockScreenPlayerChange) =
++    rememberPreference(LockScreenPlayerEnabledKey, defaultValue = true)
++  val lockScreenContext = androidx.compose.ui.platform.LocalContext.current
+   val (resumeOnBluetoothConnect, onResumeOnBluetoothConnectChange) =
+     rememberPreference(ResumeOnBluetoothConnectKey, defaultValue = false)
+   val (autoplayOnAutomotiveConnect, onAutoplayOnAutomotiveConnectChange) =
+@@ -1341,6 +1346,35 @@ fun PlayerSettings(
+             },
+             onClick = { onPauseOnMuteChange(!pauseOnMute) }
+           ),
++          Material3SettingsItem(
++            isHighlighted = (highlightKey == stringResource(R.string.lock_screen_player)),
++            icon = painterResource(R.drawable.lock),
++            title = { Text(stringResource(R.string.lock_screen_player)) },
++            description = { Text(stringResource(R.string.lock_screen_player_desc)) },
++            trailingContent = {
++              Switch(
++                checked = lockScreenPlayer,
++                onCheckedChange = {
++                  onLockScreenPlayerChange(it)
++                  if (it) LockScreenLauncher.requestPermissionIfNeeded(lockScreenContext)
++                },
++                thumbContent = {
++                  Icon(
++                    painter =
++                      painterResource(
++                        id = if (lockScreenPlayer) R.drawable.check else R.drawable.close
++                      ),
++                    contentDescription = null,
++                    modifier = Modifier.size(SwitchDefaults.IconSize)
++                  )
++                }
++              )
++            },
++            onClick = {
++              onLockScreenPlayerChange(!lockScreenPlayer)
++              if (!lockScreenPlayer) LockScreenLauncher.requestPermissionIfNeeded(lockScreenContext)
++            }
++          ),
+           Material3SettingsItem(
+             isHighlighted = (highlightKey == stringResource(R.string.resume_on_bluetooth_connect)),
+             icon = painterResource(R.drawable.bluetooth),
+diff --git a/app/src/main/res/values/echo_strings.xml b/app/src/main/res/values/echo_strings.xml
+index c2e1074..8b6456f 100644
+--- a/app/src/main/res/values/echo_strings.xml
++++ b/app/src/main/res/values/echo_strings.xml
+@@ -1087,4 +1087,6 @@
+     <string name="legacy_icon">Legacy Icon</string>
+     <string name="legacy_icon_desc">Revert the app icon back to the original legacy design</string>
+     <string name="clear_queue_confirm">Are you sure you want to clear upcoming songs from the queue?</string>
++    <string name="lock_screen_player">Lock screen player</string>
++    <string name="lock_screen_player_desc">Show album covers and controls over the lock screen while music plays</string>
+ </resources>
+diff --git a/core/src/main/kotlin/echo/music/iad1tya/constants/PreferenceKeys.kt b/core/src/main/kotlin/echo/music/iad1tya/constants/PreferenceKeys.kt
+index e667846..4345330 100644
+--- a/core/src/main/kotlin/echo/music/iad1tya/constants/PreferenceKeys.kt
++++ b/core/src/main/kotlin/echo/music/iad1tya/constants/PreferenceKeys.kt
+@@ -83,6 +83,7 @@ val VarispeedKey = booleanPreferencesKey("varispeed")
+ 
+ val PauseOnMute = booleanPreferencesKey("pauseOnMute")
+ val ResumeOnBluetoothConnectKey = booleanPreferencesKey("resumeOnBluetoothConnect")
++val LockScreenPlayerEnabledKey = booleanPreferencesKey("lockScreenPlayerEnabled")
+ val AutoplayOnAutomotiveConnectKey = booleanPreferencesKey("autoplayOnAutomotiveConnect")
+ val KeepScreenOn = booleanPreferencesKey("keepScreenOn")
+ val DeveloperModeKey = booleanPreferencesKey("developerMode")
