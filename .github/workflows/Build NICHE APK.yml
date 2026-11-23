@@ -14,6 +14,13 @@ jobs:
       with:
         submodules: recursive
 
+    - name: NICHE patches
+      run: |
+        for P in niche-*.patch*; do
+          test -f "$P"
+          git apply --whitespace=nowarn "$P"
+        done
+
     - name: Rename to NICHE
       run: |
         grep -rl "Echo Music" --include=*.xml app/src/main/res | xargs -r sed -i 's/Echo Music/NICHE/g'
