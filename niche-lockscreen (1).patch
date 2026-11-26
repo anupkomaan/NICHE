@@ -1,0 +1,1667 @@
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 71844b7..146a030 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -4,6 +4,8 @@
+ 
+     <uses-permission android:name="android.permission.INTERNET" />
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
++    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
++    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+@@ -83,6 +85,16 @@
+             android:name="org.apache.http.legacy"
+             android:required="false" />
+ 
++        <activity
++            android:name=".ui.lockscreen.LockScreenPlayerActivity"
++            android:exported="false"
++            android:excludeFromRecents="true"
++            android:launchMode="singleInstance"
++            android:showWhenLocked="true"
++            android:turnScreenOn="true"
++            android:taskAffinity=""
++            android:theme="@android:style/Theme.Material.NoActionBar" />
++
+         <activity
+             android:name=".ui.screens.CrashActivity"
+             android:exported="false"
+diff --git a/app/src/main/kotlin/com/music/echo/playback/LyricsIsland.kt b/app/src/main/kotlin/com/music/echo/playback/LyricsIsland.kt
+new file mode 100644
+index 0000000..603bf1d
+--- /dev/null
++++ b/app/src/main/kotlin/com/music/echo/playback/LyricsIsland.kt
+@@ -0,0 +1,364 @@
++package echo.music.iad1tya.playback
++
++import android.content.Context
++import android.content.Intent
++import android.graphics.Color
++import android.graphics.PixelFormat
++import android.graphics.Typeface
++import android.graphics.drawable.GradientDrawable
++import android.net.Uri
++import android.os.Build
++import android.os.Handler
++import android.os.Looper
++import android.provider.Settings
++import android.text.TextUtils
++import android.util.TypedValue
++import android.view.Gravity
++import android.view.View
++import android.view.ViewGroup
++import android.view.WindowManager
++import android.widget.ImageView
++import android.widget.LinearLayout
++import android.widget.TextView
++import androidx.media3.common.Player
++import echo.music.iad1tya.R
++import echo.music.iad1tya.db.entities.LyricsEntity
++import echo.music.iad1tya.lyrics.LyricsEntry
++import echo.music.iad1tya.lyrics.LyricsUtils
++
++/**
++ * A small floating "island" pill at the top of the screen that shows the current lyric line while
++ * music plays. Tap it to expand: title, artist, nearby lyric lines and previous / play / next.
++ *
++ * Needs the "Display over other apps" permission. Built from plain views so it does not need any
++ * activity or lifecycle owner.
++ */
++class LyricsIsland(
++  private val context: Context,
++  private val playerProvider: () -> Player?,
++  /** Called with the current lyric line (or null) so the music card can show it as the artist. */
++  private val onLine: (String?) -> Unit = {},
++) {
++  private val handler = Handler(Looper.getMainLooper())
++
++  private var enabled = false
++  private var cardMode = false
++  private var lastPublished: String? = null
++  private var title = ""
++  private var artist = ""
++  private var lines: List<LyricsEntry> = emptyList()
++  private var lastIndex = -2
++  private var expanded = false
++  private var attached = false
++
++  private var windowManager: WindowManager? = null
++  private var params: WindowManager.LayoutParams? = null
++  private var root: LinearLayout? = null
++  private var collapsedRow: LinearLayout? = null
++  private var collapsedText: TextView? = null
++  private var expandedBox: LinearLayout? = null
++  private var titleView: TextView? = null
++  private var artistView: TextView? = null
++  private var prevView: TextView? = null
++  private var currentView: TextView? = null
++  private var nextView: TextView? = null
++  private var playView: ImageView? = null
++
++  private val collapseRunnable = Runnable { setExpanded(false) }
++
++  private val tick =
++    object : Runnable {
++      override fun run() {
++        update()
++        if (enabled || cardMode) handler.postDelayed(this, 300L)
++      }
++    }
++
++  private fun refreshTick() {
++    handler.removeCallbacks(tick)
++    if (enabled || cardMode) {
++      tick.run()
++    } else {
++      detach()
++      publishLine(null)
++    }
++  }
++
++  private fun publishLine(line: String?) {
++    if (line == lastPublished) return
++    lastPublished = line
++    onLine(line)
++  }
++
++  fun setEnabled(value: Boolean) {
++    handler.post {
++      enabled = value
++      refreshTick()
++    }
++  }
++
++  /** When on, the current lyric line is also sent to the music card (as the artist text). */
++  fun setCardMode(value: Boolean) {
++    handler.post {
++      cardMode = value
++      refreshTick()
++    }
++  }
++
++  fun setSong(title: String, artist: String, lines: List<LyricsEntry>) {
++    handler.post {
++      this.title = title
++      this.artist = artist
++      this.lines = lines
++      lastIndex = -2
++      if (enabled || cardMode) update()
++    }
++  }
++
++  fun destroy() {
++    handler.post {
++      enabled = false
++      cardMode = false
++      handler.removeCallbacksAndMessages(null)
++      detach()
++      publishLine(null)
++    }
++  }
++
++  private fun canDraw(): Boolean = runCatching { Settings.canDrawOverlays(context) }.getOrDefault(false)
++
++  private fun update() {
++    val p = playerProvider()
++    val playing = p != null && p.playbackState != Player.STATE_ENDED && p.playWhenReady
++    if (cardMode && playing && lines.isNotEmpty()) {
++      val at = p!!.currentPosition
++      val i = lines.indexOfLast { it.time <= at }
++      publishLine(if (i >= 0) lines[i].text else null)
++    } else {
++      publishLine(null)
++    }
++    val wanted =
++      enabled &&
++        lines.isNotEmpty() &&
++        p != null &&
++        p.playbackState != Player.STATE_ENDED &&
++        (p.playWhenReady || expanded) &&
++        canDraw()
++    if (!wanted || p == null) {
++      detach()
++      return
++    }
++    attach()
++    if (!attached) return
++
++    val position = p.currentPosition
++    val index = lines.indexOfLast { it.time <= position }
++    if (index != lastIndex) {
++      lastIndex = index
++      bindLines(index)
++    }
++    playView?.setImageResource(if (p.playWhenReady) R.drawable.pause else R.drawable.play)
++  }
++
++  private fun bindLines(index: Int) {
++    collapsedText?.text = if (index >= 0) lines[index].text else title
++    titleView?.text = title
++    artistView?.text = artist
++    prevView?.text = lines.getOrNull(index - 1)?.text.orEmpty()
++    currentView?.text = if (index >= 0) lines[index].text else "♪"
++    nextView?.text = lines.getOrNull(index + 1)?.text.orEmpty()
++  }
++
++  private fun dp(value: Int): Int =
++    (value * context.resources.displayMetrics.density).toInt()
++
++  private fun screenWidth(): Int = context.resources.displayMetrics.widthPixels
++
++  private fun statusBarHeight(): Int {
++    val id = context.resources.getIdentifier("status_bar_height", "dimen", "android")
++    return if (id > 0) context.resources.getDimensionPixelSize(id) else dp(28)
++  }
++
++  private fun text(sizeSp: Float, color: Int, bold: Boolean = false, lines: Int = 1): TextView =
++    TextView(context).apply {
++      setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
++      setTextColor(color)
++      maxLines = lines
++      ellipsize = TextUtils.TruncateAt.END
++      if (bold) setTypeface(typeface, Typeface.BOLD)
++    }
++
++  private fun icon(resId: Int, sizeDp: Int, onClick: () -> Unit): ImageView =
++    ImageView(context).apply {
++      setImageResource(resId)
++      setColorFilter(Color.WHITE)
++      setPadding(dp(12), dp(8), dp(12), dp(8))
++      layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
++      setOnClickListener {
++        onClick()
++        scheduleCollapse()
++      }
++    }
++
++  private fun buildView(): LinearLayout {
++    val box =
++      LinearLayout(context).apply {
++        orientation = LinearLayout.VERTICAL
++        background =
++          GradientDrawable().apply {
++            setColor(0xF2000000.toInt())
++            cornerRadius = dp(26).toFloat()
++          }
++        setPadding(dp(16), dp(8), dp(16), dp(8))
++        elevation = dp(6).toFloat()
++        setOnClickListener { setExpanded(!expanded) }
++      }
++
++    // Collapsed: a note icon and the current lyric line.
++    val row =
++      LinearLayout(context).apply {
++        orientation = LinearLayout.HORIZONTAL
++        gravity = Gravity.CENTER_VERTICAL
++      }
++    val note =
++      ImageView(context).apply {
++        setImageResource(R.drawable.music_note)
++        setColorFilter(Color.WHITE)
++        layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(8) }
++      }
++    val line = text(14f, Color.WHITE, bold = true).apply { maxWidth = (screenWidth() * 0.66f).toInt() }
++    row.addView(note)
++    row.addView(line)
++    box.addView(row)
++    collapsedRow = row
++    collapsedText = line
++
++    // Expanded: title, artist, three lyric lines, controls.
++    val big =
++      LinearLayout(context).apply {
++        orientation = LinearLayout.VERTICAL
++        visibility = View.GONE
++      }
++    titleView = text(16f, Color.WHITE, bold = true)
++    artistView = text(13f, 0xFFB5B5B5.toInt())
++    prevView = text(13f, 0xFF8A8A8A.toInt()).apply { setPadding(0, dp(12), 0, 0) }
++    currentView = text(19f, Color.WHITE, bold = true, lines = 3).apply { setPadding(0, dp(4), 0, dp(4)) }
++    nextView = text(13f, 0xFF8A8A8A.toInt())
++    big.addView(titleView)
++    big.addView(artistView)
++    big.addView(prevView)
++    big.addView(currentView)
++    big.addView(nextView)
++
++    val controls =
++      LinearLayout(context).apply {
++        orientation = LinearLayout.HORIZONTAL
++        gravity = Gravity.CENTER
++        setPadding(0, dp(8), 0, 0)
++      }
++    controls.addView(
++      icon(R.drawable.skip_previous, 56) {
++        playerProvider()?.let { if (it.hasPreviousMediaItem()) it.seekToPreviousMediaItem() else it.seekTo(0L) }
++      }
++    )
++    val play =
++      icon(R.drawable.pause, 64) {
++        playerProvider()?.let { if (it.playWhenReady) it.pause() else it.play() }
++      }
++    playView = play
++    controls.addView(play)
++    controls.addView(
++      icon(R.drawable.skip_next, 56) {
++        playerProvider()?.let { if (it.hasNextMediaItem()) it.seekToNextMediaItem() }
++      }
++    )
++    big.addView(controls)
++    box.addView(big)
++    expandedBox = big
++    return box
++  }
++
++  private fun attach() {
++    if (attached) return
++    try {
++      val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
++      val view = buildView()
++      val lp =
++        WindowManager.LayoutParams(
++          ViewGroup.LayoutParams.WRAP_CONTENT,
++          ViewGroup.LayoutParams.WRAP_CONTENT,
++          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
++          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
++            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
++            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
++            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
++          PixelFormat.TRANSLUCENT,
++        )
++      lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
++      lp.y = statusBarHeight() + dp(2)
++      if (Build.VERSION.SDK_INT >= 30) {
++        lp.layoutInDisplayCutoutMode =
++          WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
++      }
++      wm.addView(view, lp)
++      windowManager = wm
++      params = lp
++      root = view
++      attached = true
++      expanded = false
++      lastIndex = -2
++    } catch (e: Exception) {
++      attached = false
++      root = null
++    }
++  }
++
++  private fun detach() {
++    handler.removeCallbacks(collapseRunnable)
++    if (!attached) return
++    runCatching { windowManager?.removeView(root) }
++    attached = false
++    expanded = false
++    root = null
++    params = null
++  }
++
++  private fun setExpanded(value: Boolean) {
++    if (!attached) return
++    expanded = value
++    expandedBox?.visibility = if (value) View.VISIBLE else View.GONE
++    collapsedRow?.visibility = if (value) View.GONE else View.VISIBLE
++    params?.let {
++      it.width = if (value) (screenWidth() * 0.92f).toInt() else ViewGroup.LayoutParams.WRAP_CONTENT
++      runCatching { windowManager?.updateViewLayout(root, it) }
++    }
++    handler.removeCallbacks(collapseRunnable)
++    if (value) scheduleCollapse()
++  }
++
++  private fun scheduleCollapse() {
++    handler.removeCallbacks(collapseRunnable)
++    handler.postDelayed(collapseRunnable, 8000L)
++  }
++
++  companion object {
++    /** Splits stored lyrics into timed lines; empty when there are no synced lyrics. */
++    fun parse(lyrics: String?): List<LyricsEntry> {
++      if (lyrics.isNullOrBlank() || lyrics == LyricsEntity.LYRICS_NOT_FOUND) return emptyList()
++      val parsed = runCatching { LyricsUtils.parseLyrics(lyrics) }.getOrNull() ?: return emptyList()
++      if (parsed.none { it.time > 0L }) return emptyList()
++      return parsed.filter { !it.isBackground && it.text.isNotBlank() }.sorted()
++    }
++
++    /** Opens the system page where the user allows "Display over other apps" for NICHE. */
++    fun requestOverlayPermission(context: Context) {
++      if (runCatching { Settings.canDrawOverlays(context) }.getOrDefault(false)) return
++      runCatching {
++        context.startActivity(
++          Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + context.packageName))
++            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        )
++      }
++    }
++  }
++}
+diff --git a/app/src/main/kotlin/com/music/echo/playback/MusicService.kt b/app/src/main/kotlin/com/music/echo/playback/MusicService.kt
+index c35e16a..271c924 100644
+--- a/app/src/main/kotlin/com/music/echo/playback/MusicService.kt
++++ b/app/src/main/kotlin/com/music/echo/playback/MusicService.kt
+@@ -118,7 +118,11 @@ import echo.music.iad1tya.constants.PreloadNextSongLimitKey
+ import echo.music.iad1tya.constants.PreventDuplicateTracksInQueueKey
+ import echo.music.iad1tya.constants.RememberShuffleAndRepeatKey
+ import echo.music.iad1tya.constants.RepeatModeKey
++import echo.music.iad1tya.constants.LockScreenPlayerEnabledKey
++import echo.music.iad1tya.constants.LyricsInCardKey
++import echo.music.iad1tya.constants.LyricsIslandEnabledKey
+ import echo.music.iad1tya.constants.ResumeOnBluetoothConnectKey
++import echo.music.iad1tya.ui.lockscreen.LockScreenLauncher
+ import echo.music.iad1tya.constants.ShowLyricsKey
+ import echo.music.iad1tya.constants.ShuffleModeKey
+ import echo.music.iad1tya.constants.ShufflePlaylistFirstKey
+@@ -510,6 +514,18 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
+ 
+   private lateinit var mediaSession: MediaLibrarySession
+   private val sessionLyricInfo = SessionLyricInfo()
++  private val lyricsIsland by lazy {
++    LyricsIsland(
++      this,
++      { if (::player.isInitialized) player else null },
++      { line ->
++        sessionLyricInfo.liveLine = line
++        if (::mediaSession.isInitialized) {
++          (mediaSession.player as? SessionArtworkPlayer)?.onLyricInfoChanged()
++        }
++      },
++    )
++  }
+   private var isSessionReleased = false
+ 
+   private fun releaseMediaSessionSafely() {
+@@ -726,6 +742,9 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
+           }
+           Intent.ACTION_SCREEN_ON -> {
+             if (player.isPlaying) {
++              if (dataStore.get(LockScreenPlayerEnabledKey, true)) {
++                LockScreenLauncher.launchIfLocked(this@MusicService)
++              }
+               scope.launch { currentSong.value?.let { song -> ensurePresenceManager() } }
+             }
+           }
+@@ -857,7 +876,7 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
+ 
+     setMediaNotificationProvider(
+       EchoNotificationProvider(this, { NOTIFICATION_ID }, CHANNEL_ID, R.string.music_player).apply {
+-        setSmallIcon(R.drawable.ic_launcher_nobg)
++        setSmallIcon(R.drawable.niche_notif)
+       },
+     )
+     player = createExoPlayer()
+@@ -1172,7 +1191,15 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
+         }
+       }
+       .collectLatest(scope) { (metadata, lyrics) ->
+-        if (metadata == null) return@collectLatest
++        if (metadata == null) {
++          lyricsIsland.setSong("", "", emptyList())
++          return@collectLatest
++        }
++        lyricsIsland.setSong(
++          metadata.title,
++          metadata.artists.joinToString { it.name },
++          withContext(Dispatchers.Default) { LyricsIsland.parse(lyrics) },
++        )
+         val generation = sessionLyricInfo.generationFor(metadata.id)
+         val json =
+           withContext(Dispatchers.Default) {
+@@ -1191,6 +1218,16 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
+         }
+       }
+ 
++    dataStore.data
++      .map { it[LyricsIslandEnabledKey] ?: false }
++      .distinctUntilChanged()
++      .collectLatest(scope) { lyricsIsland.setEnabled(it) }
++
++    dataStore.data
++      .map { it[LyricsInCardKey] ?: false }
++      .distinctUntilChanged()
++      .collectLatest(scope) { lyricsIsland.setCardMode(it) }
++
+     dataStore.data
+       .map {
+         (try {
+@@ -5145,6 +5182,7 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
+ 
+   override fun onDestroy() {
+     isRunning = false
++    lyricsIsland.destroy()
+     savePodcastPosition()
+     crossfadeTriggerJob?.cancel()
+     crossfadeJob?.cancel()
+diff --git a/app/src/main/kotlin/com/music/echo/playback/OplusLyricInfo.kt b/app/src/main/kotlin/com/music/echo/playback/OplusLyricInfo.kt
+index b5ebb26..b33811d 100644
+--- a/app/src/main/kotlin/com/music/echo/playback/OplusLyricInfo.kt
++++ b/app/src/main/kotlin/com/music/echo/playback/OplusLyricInfo.kt
+@@ -127,6 +127,9 @@ class SessionLyricInfo {
+   class Payload(val mediaId: String, val json: String, val stamp: String)
+ 
+   @Volatile private var payload: Payload? = null
++
++  /** Current lyric line shown by the music card in place of the artist, or null. */
++  @Volatile var liveLine: String? = null
+   private var publishCount = 0L
+   private var trackId: String? = null
+   private var trackGeneration = 0L
+diff --git a/app/src/main/kotlin/com/music/echo/playback/SessionArtworkPlayer.kt b/app/src/main/kotlin/com/music/echo/playback/SessionArtworkPlayer.kt
+index 6bbca9c..008d12a 100644
+--- a/app/src/main/kotlin/com/music/echo/playback/SessionArtworkPlayer.kt
++++ b/app/src/main/kotlin/com/music/echo/playback/SessionArtworkPlayer.kt
+@@ -74,7 +74,16 @@ class SessionArtworkPlayer(
+    * is not exported to the platform session and gets an invisible suffix
+    * (appended to any existing station) that alternates with every new payload.
+    */
+-  private fun withLyricInfo(metadata: MediaMetadata): MediaMetadata {
++  private fun withLyricInfo(metadata: MediaMetadata): MediaMetadata =
++    withLiveLine(withLyricExtras(metadata))
++
++  /** Shows the current lyric line where the artist goes (music card, notification). */
++  private fun withLiveLine(metadata: MediaMetadata): MediaMetadata {
++    val live = lyricInfo?.liveLine?.takeIf { it.isNotBlank() } ?: return metadata
++    return metadata.buildUpon().setArtist(live).build()
++  }
++
++  private fun withLyricExtras(metadata: MediaMetadata): MediaMetadata {
+     val info = lyricInfo?.current(super.getCurrentMediaItem()?.mediaId) ?: return metadata
+     val extras = Bundle(metadata.extras ?: Bundle()).apply { putString(OplusLyricInfo.METADATA_KEY, info.json) }
+     return metadata.buildUpon()
+diff --git a/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenLauncher.kt b/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenLauncher.kt
+new file mode 100644
+index 0000000..8a5a43a
+--- /dev/null
++++ b/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenLauncher.kt
+@@ -0,0 +1,97 @@
++package echo.music.iad1tya.ui.lockscreen
++
++import android.app.KeyguardManager
++import android.app.Notification
++import android.app.NotificationChannel
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.content.Context
++import android.content.Intent
++import android.net.Uri
++import android.os.Build
++import android.os.Handler
++import android.os.Looper
++import android.provider.Settings
++import androidx.core.app.NotificationCompat
++import echo.music.iad1tya.R
++
++/**
++ * Shows [LockScreenPlayerActivity] over the lock screen when the screen wakes while music plays.
++ *
++ * Android blocks apps from opening screens out of the blue, so besides a direct attempt this posts
++ * a short-lived full-screen-intent notification (the same mechanism alarm and call apps use).
++ */
++object LockScreenLauncher {
++  private const val CHANNEL_ID = "lock_screen_player"
++  private const val NOTIFICATION_ID = 7711
++
++  fun launchIfLocked(context: Context) {
++    val keyguard = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager ?: return
++    if (!keyguard.isKeyguardLocked) return
++
++    val intent =
++      Intent(context, LockScreenPlayerActivity::class.java)
++        .addFlags(
++          Intent.FLAG_ACTIVITY_NEW_TASK or
++            Intent.FLAG_ACTIVITY_CLEAR_TOP or
++            Intent.FLAG_ACTIVITY_NO_ANIMATION
++        )
++
++    runCatching { context.startActivity(intent) }
++    runCatching { postFullScreenIntent(context, intent) }
++  }
++
++  private fun postFullScreenIntent(context: Context, intent: Intent) {
++    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
++    if (!manager.areNotificationsEnabled()) return
++    if (Build.VERSION.SDK_INT >= 34 && !manager.canUseFullScreenIntent()) return
++
++    if (Build.VERSION.SDK_INT >= 26) {
++      val channel =
++        NotificationChannel(CHANNEL_ID, "Lock screen player", NotificationManager.IMPORTANCE_HIGH)
++          .apply {
++            setSound(null, null)
++            enableVibration(false)
++            setShowBadge(false)
++            lockscreenVisibility = Notification.VISIBILITY_SECRET
++          }
++      manager.createNotificationChannel(channel)
++    }
++
++    val pending =
++      PendingIntent.getActivity(
++        context,
++        0,
++        intent,
++        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
++      )
++
++    val notification =
++      NotificationCompat.Builder(context, CHANNEL_ID)
++        .setSmallIcon(R.drawable.niche_notif)
++        .setContentTitle("NICHE")
++        .setContentText("Lock screen player")
++        .setPriority(NotificationCompat.PRIORITY_HIGH)
++        .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
++        .setVisibility(NotificationCompat.VISIBILITY_SECRET)
++        .setAutoCancel(true)
++        .setFullScreenIntent(pending, true)
++        .build()
++
++    manager.notify(NOTIFICATION_ID, notification)
++    Handler(Looper.getMainLooper()).postDelayed({ manager.cancel(NOTIFICATION_ID) }, 4000L)
++  }
++
++  /** Opens the system page where the user can allow full-screen notifications (Android 14+). */
++  fun requestPermissionIfNeeded(context: Context) {
++    if (Build.VERSION.SDK_INT < 34) return
++    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
++    if (manager.canUseFullScreenIntent()) return
++    runCatching {
++      context.startActivity(
++        Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:" + context.packageName))
++          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++      )
++    }
++  }
++}
+diff --git a/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenPlayerActivity.kt b/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenPlayerActivity.kt
+new file mode 100644
+index 0000000..768da62
+--- /dev/null
++++ b/app/src/main/kotlin/com/music/echo/ui/lockscreen/LockScreenPlayerActivity.kt
+@@ -0,0 +1,678 @@
++package echo.music.iad1tya.ui.lockscreen
++
++import android.app.KeyguardManager
++import android.content.BroadcastReceiver
++import android.content.ComponentName
++import android.content.Context
++import android.content.Intent
++import android.content.IntentFilter
++import android.content.ServiceConnection
++import android.os.Build
++import android.os.Bundle
++import android.os.IBinder
++import android.text.format.DateFormat
++import android.view.WindowManager
++import androidx.activity.ComponentActivity
++import androidx.activity.compose.setContent
++import androidx.compose.animation.core.tween
++import androidx.compose.animation.Crossfade
++import androidx.compose.foundation.background
++import androidx.compose.foundation.border
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.gestures.detectVerticalDragGestures
++import androidx.compose.foundation.interaction.DragInteraction
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.BoxWithConstraints
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.aspectRatio
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.navigationBarsPadding
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.statusBarsPadding
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.pager.HorizontalPager
++import androidx.compose.foundation.pager.PageSize
++import androidx.compose.foundation.pager.rememberPagerState
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.rounded.Pause
++import androidx.compose.material.icons.rounded.PlayArrow
++import androidx.compose.material.icons.rounded.SkipNext
++import androidx.compose.material.icons.rounded.SkipPrevious
++import androidx.compose.material3.Icon
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.material3.darkColorScheme
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.DisposableEffect
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.collectAsState
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableFloatStateOf
++import androidx.compose.runtime.mutableLongStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.runtime.snapshotFlow
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.blur
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.ColorMatrix
++import androidx.compose.ui.graphics.ColorFilter
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.graphicsLayer
++import androidx.compose.ui.graphics.vector.ImageVector
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.layout.ContentScale
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.Dp
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import androidx.compose.ui.zIndex
++import androidx.core.view.WindowCompat
++import androidx.media3.common.MediaItem
++import androidx.media3.common.Player
++import androidx.media3.exoplayer.ExoPlayer
++import coil3.compose.AsyncImage
++import coil3.request.ImageRequest
++import echo.music.iad1tya.extensions.metadata
++import echo.music.iad1tya.playback.MusicService
++import echo.music.iad1tya.ui.utils.resize
++import java.text.SimpleDateFormat
++import java.util.Date
++import java.util.Locale
++import kotlin.math.abs
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++
++/**
++ * Full-screen music player shown over the lock screen while a song plays: big clock, a row of
++ * album covers (swipe to change song), and play / pause / skip buttons.
++ */
++class LockScreenPlayerActivity : ComponentActivity() {
++  private var service by mutableStateOf<MusicService?>(null)
++
++  private val connection =
++    object : ServiceConnection {
++      override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
++        service = (binder as? MusicService.MusicBinder)?.service
++      }
++
++      override fun onServiceDisconnected(name: ComponentName?) {
++        service = null
++      }
++    }
++
++  // Close this screen as soon as the phone is unlocked or the screen turns off again.
++  private val closeReceiver =
++    object : BroadcastReceiver() {
++      override fun onReceive(context: Context?, intent: Intent?) {
++        finish()
++      }
++    }
++
++  override fun onCreate(savedInstanceState: Bundle?) {
++    super.onCreate(savedInstanceState)
++
++    if (Build.VERSION.SDK_INT >= 27) {
++      setShowWhenLocked(true)
++      setTurnScreenOn(true)
++    } else {
++      @Suppress("DEPRECATION")
++      window.addFlags(
++        WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
++          WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
++      )
++    }
++    WindowCompat.setDecorFitsSystemWindows(window, false)
++
++    runCatching {
++      registerReceiver(
++        closeReceiver,
++        IntentFilter().apply {
++          addAction(Intent.ACTION_USER_PRESENT)
++          addAction(Intent.ACTION_SCREEN_OFF)
++        },
++      )
++    }
++
++    bindService(Intent(this, MusicService::class.java), connection, Context.BIND_AUTO_CREATE)
++
++    setContent {
++      MaterialTheme(colorScheme = darkColorScheme()) {
++        LockScreenPlayer(service = service, onUnlock = { requestUnlock() })
++      }
++    }
++  }
++
++  private fun requestUnlock() {
++    val keyguard = getSystemService(KeyguardManager::class.java)
++    if (keyguard == null || !keyguard.isKeyguardLocked) {
++      finish()
++      return
++    }
++    keyguard.requestDismissKeyguard(
++      this,
++      object : KeyguardManager.KeyguardDismissCallback() {
++        override fun onDismissSucceeded() {
++          finish()
++        }
++      },
++    )
++  }
++
++  override fun onDestroy() {
++    runCatching { unregisterReceiver(closeReceiver) }
++    runCatching { unbindService(connection) }
++    super.onDestroy()
++  }
++}
++
++private data class LockItem(
++  val id: String,
++  val title: String,
++  val artist: String,
++  val artworkUrl: String?,
++)
++
++private fun MediaItem.toLockItem(): LockItem {
++  val meta = metadata
++  return LockItem(
++    id = mediaId,
++    title = meta?.title ?: mediaMetadata.title?.toString().orEmpty(),
++    artist =
++      meta?.artists?.joinToString(", ") { it.name } ?: mediaMetadata.artist?.toString().orEmpty(),
++    artworkUrl = meta?.thumbnailUrl?.resize(800, 800),
++  )
++}
++
++private fun Player.readItems(): List<LockItem> =
++  (0 until mediaItemCount).map { getMediaItemAt(it).toLockItem() }
++
++private fun Player.skipToPrevious() {
++  if (hasPreviousMediaItem()) seekToPreviousMediaItem() else seekTo(0L)
++}
++
++private fun Player.skipToNext() {
++  if (hasNextMediaItem()) seekToNextMediaItem()
++}
++
++private fun Player.togglePlayback() {
++  if (playWhenReady && playbackState != Player.STATE_ENDED) {
++    pause()
++  } else {
++    if (playbackState == Player.STATE_IDLE) prepare()
++    if (playbackState == Player.STATE_ENDED) seekToDefaultPosition()
++    play()
++  }
++}
++
++@Composable
++private fun LockScreenPlayer(service: MusicService?, onUnlock: () -> Unit) {
++  val context = LocalContext.current
++
++  val playerFlow: StateFlow<ExoPlayer?> =
++    remember(service) { service?.playerFlow ?: MutableStateFlow<ExoPlayer?>(null) }
++  val player by playerFlow.collectAsState()
++
++  var items by remember(player) { mutableStateOf(emptyList<LockItem>()) }
++  var index by remember(player) { mutableIntStateOf(0) }
++  var playing by remember(player) { mutableStateOf(false) }
++  var progress by remember(player) { mutableFloatStateOf(0f) }
++  val beat = rememberBeatLevel(player, playing)
++
++  DisposableEffect(player) {
++    val p = player
++    val listener =
++      object : Player.Listener {
++        override fun onEvents(source: Player, events: Player.Events) {
++          if (
++            events.containsAny(
++              Player.EVENT_TIMELINE_CHANGED,
++              Player.EVENT_MEDIA_ITEM_TRANSITION,
++              Player.EVENT_MEDIA_METADATA_CHANGED,
++            )
++          ) {
++            items = source.readItems()
++          }
++          index = source.currentMediaItemIndex.coerceAtLeast(0)
++          playing = source.playWhenReady && source.playbackState != Player.STATE_ENDED
++        }
++      }
++    if (p != null) {
++      items = p.readItems()
++      index = p.currentMediaItemIndex.coerceAtLeast(0)
++      playing = p.playWhenReady && p.playbackState != Player.STATE_ENDED
++      p.addListener(listener)
++    }
++    onDispose { p?.removeListener(listener) }
++  }
++
++  LaunchedEffect(player) {
++    while (true) {
++      val p = player
++      val d = p?.duration ?: 0L
++      progress = if (p != null && d > 0L) (p.currentPosition.toFloat() / d).coerceIn(0f, 1f) else 0f
++      delay(500L)
++    }
++  }
++
++  val safeIndex = index.coerceIn(0, (items.size - 1).coerceAtLeast(0))
++  val current = items.getOrNull(safeIndex)
++
++  Box(Modifier.fillMaxSize().background(Color.Black)) {
++    val backgroundUrl = current?.artworkUrl
++    // The whole screen takes the colours of the current album cover and fades when the song changes.
++    Crossfade(targetState = backgroundUrl, animationSpec = tween(700), label = "bg") { url ->
++      if (url != null) {
++        AsyncImage(
++          model = ImageRequest.Builder(context).data(url).build(),
++          contentDescription = null,
++          contentScale = ContentScale.Crop,
++          colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(1.5f) }),
++          modifier =
++            Modifier.fillMaxSize().blur(100.dp).graphicsLayer {
++              val s = 1f + 0.10f * beat.floatValue
++              scaleX = s
++              scaleY = s
++            },
++        )
++      }
++    }
++    Box(
++      Modifier.fillMaxSize()
++        .background(
++          Brush.verticalGradient(listOf(Color(0x40000000), Color(0x00000000), Color(0x80000000)))
++        )
++    )
++    // Light pulse on every beat.
++    Box(
++      Modifier.fillMaxSize().graphicsLayer { alpha = 0.16f * beat.floatValue }.background(Color.White)
++    )
++
++    Column(
++      modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
++      horizontalAlignment = Alignment.CenterHorizontally,
++    ) {
++      ClockBlock(Modifier.padding(top = 24.dp))
++      Spacer(Modifier.weight(1f))
++
++      if (items.isEmpty()) {
++        Text("Nothing playing", color = Color.White.copy(alpha = 0.7f), fontSize = 18.sp)
++      } else {
++        CoverRow(items = items, index = safeIndex) { page ->
++          val p = player
++          if (p != null && page in 0 until p.mediaItemCount && page != p.currentMediaItemIndex) {
++            p.seekTo(page, 0L)
++            p.play()
++          }
++        }
++        Spacer(Modifier.height(28.dp))
++        ControlBar(
++          current = current,
++          playing = playing,
++          progress = progress,
++          onPrevious = { player?.skipToPrevious() },
++          onToggle = { player?.togglePlayback() },
++          onNext = { player?.skipToNext() },
++        )
++      }
++
++      Spacer(Modifier.weight(1f))
++      UnlockHint(onUnlock)
++    }
++  }
++}
++
++/**
++ * Loudness of the bass (0..1), updated about 20 times a second while music plays, so the
++ * background can pulse with the beat. Needs the microphone permission (Android requires it for
++ * audio visualizers); without it this stays at 0 and the background simply does not pulse.
++ */
++@Composable
++private fun rememberBeatLevel(
++  player: ExoPlayer?,
++  playing: Boolean,
++): androidx.compose.runtime.FloatState {
++  val context = LocalContext.current
++  val level = remember { mutableFloatStateOf(0f) }
++  DisposableEffect(player, playing) {
++    var visualizer: android.media.audiofx.Visualizer? = null
++    val granted =
++      androidx.core.content.ContextCompat.checkSelfPermission(
++        context,
++        android.Manifest.permission.RECORD_AUDIO,
++      ) == android.content.pm.PackageManager.PERMISSION_GRANTED
++    val sessionId = player?.audioSessionId ?: 0
++    if (granted && playing && sessionId > 0) {
++      try {
++        var peak = 1f
++        val v = android.media.audiofx.Visualizer(sessionId)
++        v.captureSize = android.media.audiofx.Visualizer.getCaptureSizeRange()[0].coerceAtLeast(256)
++        v.setDataCaptureListener(
++          object : android.media.audiofx.Visualizer.OnDataCaptureListener {
++            override fun onWaveFormDataCapture(
++              visualizer: android.media.audiofx.Visualizer?,
++              waveform: ByteArray?,
++              samplingRate: Int,
++            ) {}
++
++            override fun onFftDataCapture(
++              visualizer: android.media.audiofx.Visualizer?,
++              fft: ByteArray?,
++              samplingRate: Int,
++            ) {
++              if (fft == null || fft.size < 16) return
++              var bass = 0f
++              for (k in 1..6) {
++                val re = fft[2 * k].toFloat()
++                val im = fft[2 * k + 1].toFloat()
++                bass += kotlin.math.sqrt(re * re + im * im)
++              }
++              peak = maxOf(peak * 0.995f, bass, 1f)
++              val target = ((bass / peak - 0.45f) / 0.55f).coerceIn(0f, 1f)
++              val old = level.floatValue
++              level.floatValue = if (target > old) target else old * 0.85f
++            }
++          },
++          android.media.audiofx.Visualizer.getMaxCaptureRate() / 2,
++          false,
++          true,
++        )
++        v.enabled = true
++        visualizer = v
++      } catch (e: Exception) {
++        visualizer = null
++      }
++    }
++    onDispose {
++      runCatching {
++        visualizer?.enabled = false
++        visualizer?.release()
++      }
++      level.floatValue = 0f
++    }
++  }
++  return level
++}
++
++private val GlassFill = Brush.verticalGradient(listOf(Color(0x44FFFFFF), Color(0x1AFFFFFF)))
++private val GlassBorder = Color(0x44FFFFFF)
++
++@Composable
++private fun CoverRow(items: List<LockItem>, index: Int, onPageSettled: (Int) -> Unit) {
++  val context = LocalContext.current
++  BoxWithConstraints(Modifier.fillMaxWidth()) {
++    val cardWidth = minOf(maxWidth * 0.62f, 280.dp)
++    val cardHeight = cardWidth + 52.dp
++    val sidePadding = (maxWidth - cardWidth) / 2
++    val pagerState =
++      rememberPagerState(initialPage = index.coerceIn(0, (items.size - 1).coerceAtLeast(0))) {
++        items.size
++      }
++    var userDragged by remember { mutableStateOf(false) }
++
++    // Song changed from outside (skip button, notification, auto-next): move the cards.
++    LaunchedEffect(index, items.size) {
++      if (
++        items.isNotEmpty() &&
++          index in items.indices &&
++          pagerState.settledPage != index &&
++          !pagerState.isScrollInProgress
++      ) {
++        userDragged = false
++        pagerState.animateScrollToPage(index)
++      }
++    }
++    // Remember that the finger (not the code) moved the cards.
++    LaunchedEffect(pagerState) {
++      pagerState.interactionSource.interactions.collect {
++        if (it is DragInteraction.Start) userDragged = true
++      }
++    }
++    // Finger swipe finished on a new card: play that song.
++    LaunchedEffect(pagerState) {
++      snapshotFlow { pagerState.settledPage }
++        .collect { page ->
++          if (userDragged) {
++            userDragged = false
++            onPageSettled(page)
++          }
++        }
++    }
++
++    HorizontalPager(
++      state = pagerState,
++      modifier = Modifier.fillMaxWidth().height(cardHeight + 28.dp),
++      contentPadding = PaddingValues(horizontal = sidePadding),
++      pageSize = PageSize.Fixed(cardWidth),
++      verticalAlignment = Alignment.CenterVertically,
++    ) { page ->
++      val offset = (pagerState.currentPage - page) + pagerState.currentPageOffsetFraction
++      val distance = abs(offset).coerceAtMost(2f)
++      val item = items.getOrNull(page)
++      val shape = RoundedCornerShape(28.dp)
++      Column(
++        Modifier.width(cardWidth)
++          .height(cardHeight)
++          .zIndex(2f - distance)
++          .graphicsLayer {
++            val s = 1f - 0.16f * distance
++            scaleX = s
++            scaleY = s
++            alpha = 1f - 0.3f * distance
++            rotationY = (offset * 28f).coerceIn(-40f, 40f)
++            translationX = offset * cardWidth.toPx() * 0.3f
++            cameraDistance = 14f * density
++          }
++          .clip(shape)
++          .background(GlassFill)
++          .border(1.dp, GlassBorder, shape)
++          .padding(12.dp),
++        horizontalAlignment = Alignment.CenterHorizontally,
++      ) {
++        AsyncImage(
++          model = ImageRequest.Builder(context).data(item?.artworkUrl).build(),
++          contentDescription = null,
++          contentScale = ContentScale.Crop,
++          modifier =
++            Modifier.fillMaxWidth()
++              .aspectRatio(1f)
++              .clip(RoundedCornerShape(20.dp))
++              .background(Color(0x33FFFFFF)),
++        )
++        Spacer(Modifier.height(8.dp))
++        Text(
++          text = item?.title.orEmpty(),
++          color = Color.White,
++          fontSize = 16.sp,
++          fontWeight = FontWeight.SemiBold,
++          maxLines = 1,
++          overflow = TextOverflow.Ellipsis,
++        )
++        Text(
++          text = item?.artist.orEmpty(),
++          color = Color.White.copy(alpha = 0.7f),
++          fontSize = 14.sp,
++          maxLines = 1,
++          overflow = TextOverflow.Ellipsis,
++        )
++      }
++    }
++  }
++}
++
++@Composable
++private fun ControlBar(
++  current: LockItem?,
++  playing: Boolean,
++  progress: Float,
++  onPrevious: () -> Unit,
++  onToggle: () -> Unit,
++  onNext: () -> Unit,
++) {
++  val context = LocalContext.current
++  val shape = RoundedCornerShape(40.dp)
++  Row(
++    modifier =
++      Modifier.fillMaxWidth()
++        .padding(horizontal = 16.dp)
++        .clip(shape)
++        .background(GlassFill)
++        .border(1.dp, GlassBorder, shape)
++        .padding(horizontal = 12.dp, vertical = 10.dp),
++    verticalAlignment = Alignment.CenterVertically,
++    horizontalArrangement = Arrangement.spacedBy(4.dp),
++  ) {
++    RoundButton(Icons.Rounded.SkipPrevious, 40.dp, 26.dp, onPrevious)
++    RoundButton(
++      icon = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
++      size = 48.dp,
++      iconSize = 32.dp,
++      onClick = onToggle,
++    )
++    RoundButton(Icons.Rounded.SkipNext, 40.dp, 26.dp, onNext)
++    Spacer(Modifier.width(6.dp))
++    Column(
++      Modifier.weight(1f)
++        .clip(RoundedCornerShape(16.dp))
++        .background(Color(0x66000000))
++        .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 6.dp)
++    ) {
++      Row(verticalAlignment = Alignment.CenterVertically) {
++        AsyncImage(
++          model = ImageRequest.Builder(context).data(current?.artworkUrl).build(),
++          contentDescription = null,
++          contentScale = ContentScale.Crop,
++          modifier = Modifier.size(34.dp).clip(RoundedCornerShape(8.dp)),
++        )
++        Spacer(Modifier.width(8.dp))
++        Column {
++          Text(
++            text = current?.title.orEmpty(),
++            color = Color.White,
++            fontSize = 12.sp,
++            fontWeight = FontWeight.SemiBold,
++            maxLines = 1,
++            overflow = TextOverflow.Ellipsis,
++          )
++          Text(
++            text = current?.artist.orEmpty(),
++            color = Color.White.copy(alpha = 0.7f),
++            fontSize = 11.sp,
++            maxLines = 1,
++            overflow = TextOverflow.Ellipsis,
++          )
++        }
++      }
++      Spacer(Modifier.height(5.dp))
++      Box(Modifier.fillMaxWidth().height(3.dp).clip(CircleShape).background(Color(0x33FFFFFF))) {
++        Box(
++          Modifier.fillMaxWidth(progress.coerceIn(0f, 1f))
++            .height(3.dp)
++            .clip(CircleShape)
++            .background(Color.White)
++        )
++      }
++    }
++  }
++}
++
++@Composable
++private fun ClockBlock(modifier: Modifier = Modifier) {
++  val context = LocalContext.current
++  var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
++  LaunchedEffect(Unit) {
++    while (true) {
++      now = System.currentTimeMillis()
++      delay(5_000L)
++    }
++  }
++  val locale = Locale.getDefault()
++  val is24Hour = DateFormat.is24HourFormat(context)
++  val time = SimpleDateFormat(if (is24Hour) "HH:mm" else "h:mm", locale).format(Date(now))
++  val date = SimpleDateFormat("EEEE, MMMM d", locale).format(Date(now))
++
++  Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
++    Text(
++      text = date,
++      color = Color.White.copy(alpha = 0.85f),
++      fontSize = 18.sp,
++      fontWeight = FontWeight.Medium,
++    )
++    Text(text = time, color = Color.White, fontSize = 64.sp, fontWeight = FontWeight.Bold)
++  }
++}
++
++@Composable
++private fun RoundButton(
++  icon: ImageVector,
++  size: Dp,
++  iconSize: Dp,
++  onClick: () -> Unit,
++  filled: Boolean = false,
++) {
++  Box(
++    modifier =
++      Modifier.size(size)
++        .clip(CircleShape)
++        .background(if (filled) Color(0x33FFFFFF) else Color.Transparent)
++        .clickable(onClick = onClick),
++    contentAlignment = Alignment.Center,
++  ) {
++    Icon(
++      imageVector = icon,
++      contentDescription = null,
++      tint = Color.White,
++      modifier = Modifier.size(iconSize),
++    )
++  }
++}
++
++@Composable
++private fun UnlockHint(onUnlock: () -> Unit) {
++  Box(
++    modifier =
++      Modifier.fillMaxWidth()
++        .height(88.dp)
++        .pointerInput(Unit) {
++          var total = 0f
++          detectVerticalDragGestures(
++            onDragStart = { total = 0f },
++            onDragEnd = { if (total < -120f) onUnlock() },
++            onDragCancel = {},
++          ) { change, dragAmount ->
++            change.consume()
++            total += dragAmount
++          }
++        }
++        .clickable { onUnlock() },
++    contentAlignment = Alignment.Center,
++  ) {
++    Column(horizontalAlignment = Alignment.CenterHorizontally) {
++      Box(
++        Modifier.width(44.dp)
++          .height(5.dp)
++          .clip(CircleShape)
++          .background(Color.White.copy(alpha = 0.6f))
++      )
++      Spacer(Modifier.height(10.dp))
++      Text("Swipe up to unlock", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp)
++    }
++  }
++}
+diff --git a/app/src/main/kotlin/com/music/echo/ui/screens/settings/PlayerSettings.kt b/app/src/main/kotlin/com/music/echo/ui/screens/settings/PlayerSettings.kt
+index 2e777b4..62a8b21 100644
+--- a/app/src/main/kotlin/com/music/echo/ui/screens/settings/PlayerSettings.kt
++++ b/app/src/main/kotlin/com/music/echo/ui/screens/settings/PlayerSettings.kt
+@@ -63,7 +63,12 @@ import echo.music.iad1tya.constants.PreloadNextSongEnabledKey
+ import echo.music.iad1tya.constants.PreloadNextSongLimitKey
+ import echo.music.iad1tya.constants.PreventDuplicateTracksInQueueKey
+ import echo.music.iad1tya.constants.RememberShuffleAndRepeatKey
++import echo.music.iad1tya.constants.LockScreenPlayerEnabledKey
++import echo.music.iad1tya.constants.LyricsInCardKey
++import echo.music.iad1tya.constants.LyricsIslandEnabledKey
++import echo.music.iad1tya.playback.LyricsIsland
+ import echo.music.iad1tya.constants.ResumeOnBluetoothConnectKey
++import echo.music.iad1tya.ui.lockscreen.LockScreenLauncher
+ import echo.music.iad1tya.constants.AutoplayOnAutomotiveConnectKey
+ import echo.music.iad1tya.constants.SeekExtraSeconds
+ import echo.music.iad1tya.constants.ShufflePlaylistFirstKey
+@@ -191,6 +196,31 @@ fun PlayerSettings(
+   val (stopMusicOnTaskClear, onStopMusicOnTaskClearChange) =
+     rememberPreference(StopMusicOnTaskClearKey, defaultValue = true)
+   val (pauseOnMute, onPauseOnMuteChange) = rememberPreference(PauseOnMute, defaultValue = false)
++  val (lockScreenPlayer, onLockScreenPlayerChange) =
++    rememberPreference(LockScreenPlayerEnabledKey, defaultValue = true)
++  val lockScreenContext = androidx.compose.ui.platform.LocalContext.current
++  val audioPermissionLauncher =
++    androidx.activity.compose.rememberLauncherForActivityResult(
++      androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
++    ) {
++      LockScreenLauncher.requestPermissionIfNeeded(lockScreenContext)
++    }
++  val startLockScreenSetup: () -> Unit = {
++    val micGranted =
++      androidx.core.content.ContextCompat.checkSelfPermission(
++        lockScreenContext,
++        android.Manifest.permission.RECORD_AUDIO,
++      ) == android.content.pm.PackageManager.PERMISSION_GRANTED
++    if (micGranted) {
++      LockScreenLauncher.requestPermissionIfNeeded(lockScreenContext)
++    } else {
++      audioPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
++    }
++  }
++  val (lyricsInCard, onLyricsInCardChange) =
++    rememberPreference(LyricsInCardKey, defaultValue = false)
++  val (lyricsIsland, onLyricsIslandChange) =
++    rememberPreference(LyricsIslandEnabledKey, defaultValue = false)
+   val (resumeOnBluetoothConnect, onResumeOnBluetoothConnectChange) =
+     rememberPreference(ResumeOnBluetoothConnectKey, defaultValue = false)
+   val (autoplayOnAutomotiveConnect, onAutoplayOnAutomotiveConnectChange) =
+@@ -1341,6 +1371,87 @@ fun PlayerSettings(
+             },
+             onClick = { onPauseOnMuteChange(!pauseOnMute) }
+           ),
++          Material3SettingsItem(
++            isHighlighted = (highlightKey == stringResource(R.string.lyrics_in_card)),
++            icon = painterResource(R.drawable.lyrics),
++            title = { Text(stringResource(R.string.lyrics_in_card)) },
++            description = { Text(stringResource(R.string.lyrics_in_card_desc)) },
++            trailingContent = {
++              Switch(
++                checked = lyricsInCard,
++                onCheckedChange = onLyricsInCardChange,
++                thumbContent = {
++                  Icon(
++                    painter =
++                      painterResource(
++                        id = if (lyricsInCard) R.drawable.check else R.drawable.close
++                      ),
++                    contentDescription = null,
++                    modifier = Modifier.size(SwitchDefaults.IconSize)
++                  )
++                }
++              )
++            },
++            onClick = { onLyricsInCardChange(!lyricsInCard) }
++          ),
++          Material3SettingsItem(
++            isHighlighted = (highlightKey == stringResource(R.string.lyrics_island)),
++            icon = painterResource(R.drawable.lyrics),
++            title = { Text(stringResource(R.string.lyrics_island)) },
++            description = { Text(stringResource(R.string.lyrics_island_desc)) },
++            trailingContent = {
++              Switch(
++                checked = lyricsIsland,
++                onCheckedChange = {
++                  onLyricsIslandChange(it)
++                  if (it) LyricsIsland.requestOverlayPermission(lockScreenContext)
++                },
++                thumbContent = {
++                  Icon(
++                    painter =
++                      painterResource(
++                        id = if (lyricsIsland) R.drawable.check else R.drawable.close
++                      ),
++                    contentDescription = null,
++                    modifier = Modifier.size(SwitchDefaults.IconSize)
++                  )
++                }
++              )
++            },
++            onClick = {
++              onLyricsIslandChange(!lyricsIsland)
++              if (!lyricsIsland) LyricsIsland.requestOverlayPermission(lockScreenContext)
++            }
++          ),
++          Material3SettingsItem(
++            isHighlighted = (highlightKey == stringResource(R.string.lock_screen_player)),
++            icon = painterResource(R.drawable.lock),
++            title = { Text(stringResource(R.string.lock_screen_player)) },
++            description = { Text(stringResource(R.string.lock_screen_player_desc)) },
++            trailingContent = {
++              Switch(
++                checked = lockScreenPlayer,
++                onCheckedChange = {
++                  onLockScreenPlayerChange(it)
++                  if (it) startLockScreenSetup()
++                },
++                thumbContent = {
++                  Icon(
++                    painter =
++                      painterResource(
++                        id = if (lockScreenPlayer) R.drawable.check else R.drawable.close
++                      ),
++                    contentDescription = null,
++                    modifier = Modifier.size(SwitchDefaults.IconSize)
++                  )
++                }
++              )
++            },
++            onClick = {
++              onLockScreenPlayerChange(!lockScreenPlayer)
++              if (!lockScreenPlayer) startLockScreenSetup()
++            }
++          ),
+           Material3SettingsItem(
+             isHighlighted = (highlightKey == stringResource(R.string.resume_on_bluetooth_connect)),
+             icon = painterResource(R.drawable.bluetooth),
+diff --git a/app/src/main/res/drawable-hdpi/niche_notif.png b/app/src/main/res/drawable-hdpi/niche_notif.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..05477205aa14772c926ae8af709d70a8b9870a1b
+GIT binary patch
+literal 738
+zcmV<80v-K{P)<h;3K|Lk000e1NJLTq001Na001Ni1^@s6;Q*MJ00081Nkl<ZcwX(6
+zOQ=m@7>1wiaNJTH&Ot=E4TzF^1~Q?OnKCe7MwuEY21>>{r7#mIMFvL7Kr%VVB_fxU
+zgWN^#cRszl@7w)$d!3)%9-P5?>u;^rTK`(__rCA<|EpqV3?vL1NMwYPP!6R+Ig|?J
+zP%4ze;M@cMi3(K5?*{Ys0Nubz;56_Ncn`b+-p2El7Hu6OA^U$NL?!|=fmOh2V4>gp
+z2HXXn`0*z20XVMv%_<}U+5|;H=OUsp23P`&0~P>NfDYg`a1{6o^a9UZMJY5Im>-2S
+zLnz1yVa+tRV;*n~xa33+0*`=q{=wmX6wzhCAz&(Su^B=l(gyrYY>^5Z{Nwk4Bft%y
+z3uyOqA?AJoW&>-0!|sp@_)&YOGL#w0SzGeVcr&|fW_@PXYi3)_th4SNbIfeN&udTa
+zb(`64Gwbqe)eM`}j{RDe237e`E;a(|y|R740pOEYr#uY-z5~;N8A-M#xGGX&m#dsw
+zU;8O5>M~gq9W&W&SqfYQjsbTP+eD<k%@ttf<qTBkDafaQ2R<()^B3wv9WNId5m^g#
+z0=Iy@i5j7vh^V@ez+CUF6~J=fJh0Q}s{lPG1(m_V-_%s0P(`FR`v*<{XOj|CK&nQZ
+zE5Hh}hRCUl7Q3Qq@rS?*@3ulR={gi^$t+;Ix9T=mL?q&V+F=0|pxiw6AxK%RF|t={
+z&p#uzY!lGqK5tFzNl6U#aLY!We+K&Mf-Ti90Ar!LDogpWHjA)q2e1yf?pA4Ozv7ka
+zr6NAet9|LDMdVFE9!3C*fOD>Hzc!@^LMwq$UbWg=%e@G^b_JgL-t)X*<E)3&n*`i%
+zmQX-Mq)4nSjS&A(s=BChg<Q6311)UvMrhS;-!hbcj5(AF<xnb=L#a>>r9wIU0hDzV
+UcW2JF8UO$Q07*qoM6N<$f{Q0gYXATM
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-mdpi/niche_notif.png b/app/src/main/res/drawable-mdpi/niche_notif.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..7545e6e914d0b82208a34682e63043120fa1d8f7
+GIT binary patch
+literal 440
+zcmV;p0Z0CcP)<h;3K|Lk000e1NJLTq000;O000;W1^@s6;CDUv0004hNkl<ZcwX()
+zO-of#7zN<x_Ccr>k%^iVO)`YQFhRwsqXzmf8aR`FK!XPThx!RYQ<VrDil7ccM0B7+
+zq>vv_iHLgTJ?sOgE7uR?j=T#t2R3`JcfD)v_ms-zvRdLsEy)A*0_WoTSri>tcHM?i
+z?BFZLFpOv6U+DsKP{K_dAs?D2c#2*Opb1-;$1kko0Vd8W5X7N2h;zI~A8z3X?qUX;
+z=|GUaz%1@#I}TPNh+`cm@<;ekApMSIbl_EiyeoAyp6+f3ab<x}9K>Noc>9J-^&UQ9
+zsi3A4{g_L|8u11DNnnU9=N1)Jw_p&Dv4SZaB;v>-_IvO)35*Qh;d45Z5$8fGGZ?~4
+ze8WPODSC)@bmKWDv6@0YERq*3YQ;x1W28VFuOottZ(NQr!`oPYu#4#`LNeqXyiaOw
+zV-dg8yZ(m_{7ie{Z;l2sVQXn4vOE1^(j3H-x<?jN1pPM^h;Xan4q1`t;y>SuxX7Sg
+i3D@sucWKluIu|FDKwi-NQ|e;?0000<MNUMnLSTZ;LA^cz
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xhdpi/niche_notif.png b/app/src/main/res/drawable-xhdpi/niche_notif.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..657151d6f83a8672c6493a422840c276e8255369
+GIT binary patch
+literal 1088
+zcmV-G1i$-<P)<h;3K|Lk000e1NJLTq001xm001xu1^@s6R|5Hm000CBNkl<ZcwX(8
+zTZmR=6o#MCvGG(MC^5`KI_8C`sY8N67ZD_hfhAsvSK3uzAl)Q{niK?Gih>m0NYqv2
+zjUg3LK}z1JWFo1lO{HTg9<%g~_h)_hvD@>Hb8t2T`-RP(|KH!Yzjv+muEReqk{HSu
+zHk8R5wE<P5jzHC@BTzN!2vm(a0#&1qK-H)!0xiJsl3A=B_zd_4SPzWv$w4iHJWeNv
+z-N}fx0gnK4fi1w2?AdkTXK37i0uBM^fv@5|C<fTuCVo33HW`>7q)mJcGz>AW0hfTo
+zz?ryiLgVu1k-(F{W-q><5hxP35zhjPd@e9OJpT{yFK|4(Y(sB_0e=Cbp>a=`4UCHC
+zwDzR2ULemW6EqQD4+G1A=i~Dyz%k$j;3V)n&<WfKFOLY)kH$0a_1`;y8NeLi%fxG-
+z3^3tb*T&<(>Ik>VS-)S0JjMYNfc-%6H?57fT>b=}0u};0fd^vkzKB=@{WTy}6H8!f
+zNWuhO1(pKe0=t28k%(7-%dyT<NaX#VhNR<eXS@ik1l|LF4X&sDrwCV}K3vY7)@<KQ
+zNu9cj{gReRnjmR-$@@Db9gs9y(y(|}zHWo04<${Cy<TIUjhxM|-jeqV@`J`pdP7o|
+zq}!6dleD6Qu=kn7h}geY(lJT13Tx*`dRNkG+4qTjDc5_IP+n0iktx6i;FU<UH-RsJ
+z(^<K6QWquSy_Scok#+9I<tp@8<jOQ)4{)>~r|!{%e2N}#m$XgNK}owLEiTz#CYf|j
+zTS)7Mqz@!*mvlCiXW686O}(C<*(?HX^{EuvQ|o|9z(L@p@VsG9J3{uhuhg(oLe7jz
+z(h>Isz#mbiyx!h7Ty0#nzK@2L-q{pojm#TUSsVjw1fB*y20qG4m<=?6V);x+1Y9yF
+z#x*w9KLorC9ErsjLN=~8u2g?Fr+pVi1MJO2=s92$@FVbcnmu9&^P0SVC!>w-49a`Y
+zJF(7vz`4_B<lQrocjtTy*ahs32zY>UBeB<$Z1QO`MIw=ZFuJLcjPv`w$35foc<!Y4
+zb9dh)#a<!L0U!PhuoW8K{{iTVxy0~%QU)LH;mlgL@g`_VoXB#+u#qV*TxG0zcUyn&
+zJ$?Ewb8dhW^Zn4DXALLY>oJpiX0ZV#;HlBNc0yar#>JRxEVp0sR$o9O>EX=t&((O|
+zC-O#afNSul(f<8n8{o-tRgiYwcJ*+g`S7zb%h)*2>p7CAyCddkdn~Z$`-MD-Ed@_~
+z^Fj_b;<xawtAf2|PnR8<^jl2s?qJ6~5e4F&%4M?`CAcG|9}vxuk}|LTJyo7E_`H7O
+ze*T~t6jb%2e!x&0P&MiZRE;_URilnT)u<y-HR=ddjsE~Oq@M)w9fdjo0000<MNUMn
+GLSTX<WeO?)
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xxhdpi/niche_notif.png b/app/src/main/res/drawable-xxhdpi/niche_notif.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..3bf839a1e2fbafc5364dfad0b87cd8167a903bb1
+GIT binary patch
+literal 1893
+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
+Mth1+613H}YZ$FZPjQ{`u
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xxxhdpi/niche_notif.png b/app/src/main/res/drawable-xxxhdpi/niche_notif.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b778252833e9d1ef868ce0a0002700e2d6d25be
+GIT binary patch
+literal 2853
+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
+S<^ccz!1AUYq~V75<Np8&I(z~E
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/values/echo_strings.xml b/app/src/main/res/values/echo_strings.xml
+index c2e1074..3e2a8c2 100644
+--- a/app/src/main/res/values/echo_strings.xml
++++ b/app/src/main/res/values/echo_strings.xml
+@@ -1087,4 +1087,10 @@
+     <string name="legacy_icon">Legacy Icon</string>
+     <string name="legacy_icon_desc">Revert the app icon back to the original legacy design</string>
+     <string name="clear_queue_confirm">Are you sure you want to clear upcoming songs from the queue?</string>
++    <string name="lock_screen_player">Lock screen player</string>
++    <string name="lock_screen_player_desc">Show album covers and controls over the lock screen while music plays</string>
++    <string name="lyrics_island">Lyrics island</string>
++    <string name="lyrics_island_desc">Show the current lyric line in a floating pill at the top of the screen (needs Display over other apps)</string>
++    <string name="lyrics_in_card">Lyrics in music card</string>
++    <string name="lyrics_in_card_desc">Show the current lyric line in the music card and notification, in place of the artist name</string>
+ </resources>
+diff --git a/core/src/main/kotlin/echo/music/iad1tya/constants/PreferenceKeys.kt b/core/src/main/kotlin/echo/music/iad1tya/constants/PreferenceKeys.kt
+index e667846..3e77fa2 100644
+--- a/core/src/main/kotlin/echo/music/iad1tya/constants/PreferenceKeys.kt
++++ b/core/src/main/kotlin/echo/music/iad1tya/constants/PreferenceKeys.kt
+@@ -83,6 +83,9 @@ val VarispeedKey = booleanPreferencesKey("varispeed")
+ 
+ val PauseOnMute = booleanPreferencesKey("pauseOnMute")
+ val ResumeOnBluetoothConnectKey = booleanPreferencesKey("resumeOnBluetoothConnect")
++val LockScreenPlayerEnabledKey = booleanPreferencesKey("lockScreenPlayerEnabled")
++val LyricsIslandEnabledKey = booleanPreferencesKey("lyricsIslandEnabled")
++val LyricsInCardKey = booleanPreferencesKey("lyricsInMusicCard")
+ val AutoplayOnAutomotiveConnectKey = booleanPreferencesKey("autoplayOnAutomotiveConnect")
+ val KeepScreenOn = booleanPreferencesKey("keepScreenOn")
+ val DeveloperModeKey = booleanPreferencesKey("developerMode")
