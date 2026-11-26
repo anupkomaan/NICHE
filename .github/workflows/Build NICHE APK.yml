@@ -21,6 +21,12 @@ jobs:
           git apply --whitespace=nowarn "$P"
         done
 
+    - name: Version number
+      run: |
+        sed -i "s/versionCode = 169/versionCode = $((1000 + ${{ github.run_number }}))/" app/build.gradle.kts
+        grep -n "versionCode" app/build.gradle.kts
+        grep -q "versionCode = 1" app/build.gradle.kts
+
     - name: Rename to NICHE
       run: |
         grep -rl "Echo Music" --include=*.xml app/src/main/res | xargs -r sed -i 's/Echo Music/NICHE/g'
@@ -78,3 +84,4 @@ jobs:
       with:
         name: NICHE-APK
         path: app/build/outputs/apk/**/*.apk
+        
