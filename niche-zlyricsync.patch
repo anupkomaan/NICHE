@@ -1,0 +1,42 @@
+diff --git a/app/src/main/kotlin/com/music/echo/playback/LyricsIsland.kt b/app/src/main/kotlin/com/music/echo/playback/LyricsIsland.kt
+index 603bf1d..509cff2 100644
+--- a/app/src/main/kotlin/com/music/echo/playback/LyricsIsland.kt
++++ b/app/src/main/kotlin/com/music/echo/playback/LyricsIsland.kt
+@@ -70,7 +70,7 @@ class LyricsIsland(
+     object : Runnable {
+       override fun run() {
+         update()
+-        if (enabled || cardMode) handler.postDelayed(this, 300L)
++        if (enabled || cardMode) handler.postDelayed(this, 100L)
+       }
+     }
+ 
+@@ -131,7 +131,7 @@ class LyricsIsland(
+     val p = playerProvider()
+     val playing = p != null && p.playbackState != Player.STATE_ENDED && p.playWhenReady
+     if (cardMode && playing && lines.isNotEmpty()) {
+-      val at = p!!.currentPosition
++      val at = p!!.currentPosition + CARD_LEAD_MS
+       val i = lines.indexOfLast { it.time <= at }
+       publishLine(if (i >= 0) lines[i].text else null)
+     } else {
+@@ -151,7 +151,7 @@ class LyricsIsland(
+     attach()
+     if (!attached) return
+ 
+-    val position = p.currentPosition
++    val position = p.currentPosition + ISLAND_LEAD_MS
+     val index = lines.indexOfLast { it.time <= position }
+     if (index != lastIndex) {
+       lastIndex = index
+@@ -342,6 +342,10 @@ class LyricsIsland(
+   }
+ 
+   companion object {
++    /** Show lines a little early: the system music card needs a moment to redraw. */
++    private const val CARD_LEAD_MS = 650L
++    private const val ISLAND_LEAD_MS = 250L
++
+     /** Splits stored lyrics into timed lines; empty when there are no synced lyrics. */
+     fun parse(lyrics: String?): List<LyricsEntry> {
+       if (lyrics.isNullOrBlank() || lyrics == LyricsEntity.LYRICS_NOT_FOUND) return emptyList()
